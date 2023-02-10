@@ -356,7 +356,8 @@ def get_module(model, name):
     """
     Finds the named module within the given model.
     """
-    for n, m in model.named_modules():
+    # for n, m in model.named_modules():
+    for n, m in model.named_modules(remove_duplicate=False):
         if n == name:
             return m
     raise LookupError(name)
