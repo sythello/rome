@@ -387,3 +387,12 @@ def make_dec_prompt(dec_target, subject):
     s, e = m.span(1)
     prompt = dec_target[:s].strip()
     return prompt
+
+def ensure_list(x):
+    """ If x is singleton (int, float, etc.), make it a singleton-list """
+    try:
+        _ = x[0]
+    except:
+        # singleton
+        x = [x]
+    return x

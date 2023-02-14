@@ -29,7 +29,7 @@ from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, load_model_uskg, load_raw_dataset, run_model_forward_uskg, \
     decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
-    separate_punct, make_dec_prompt, parse_struct_in
+    separate_punct, make_dec_prompt, parse_struct_in, ensure_list
 
 from transformers import (
     HfArgumentParser,
@@ -48,17 +48,27 @@ from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
 def main():
     args = Namespace()
     args.subject_type = 'column'         # table, column, value
-    args.part = 'decoder'               # encoder, decoder, both
-    main_sdra_1_struct_node_restore(args)
+    args.part = 'encoder'               # encoder, decoder, both
+    args.spider_dev_path = '/home/yshao/Projects/SDR-analysis/data/spider/dev+ratsql_graph.json'
+    args.spider_db_dir = '/home/yshao/Projects/language/language/xsp/data/spider/database'
+    args.data_cache_dir = '/home/yshao/Projects/rome/cache'
+
+    args.result_dir = '/home/yshao/Projects/rome/results'
+
+    main_sdra_2_2_dirty_text_struct_restore(args)
 
 
 def main_sdra_1_struct_node_restore(args):
-    spider_dev_path = '/home/yshao/Projects/SDR-analysis/data/spider/dev+ratsql_graph.json'
-    spider_db_dir = '/home/yshao/Projects/language/language/xsp/data/spider/database'
-    data_cache_dir = '/home/yshao/Projects/rome/cache'
+    """
+    Exp 1: Corrupt the struct node of interest, restore every single state
+    Purpose: check where is the node-relevant info stored
+    """
+    spider_dev_path = args.spider_dev_path
+    spider_db_dir = args.spider_db_dir
+    data_cache_dir = args.data_cache_dir
 
     exp_name = f'dev_{args.subject_type}_{args.part}'
-    result_save_dir = '/home/yshao/Projects/rome/results/struct_node_restore'
+    result_save_dir = os.path.join(args.result_dir, 'struct_node_restore')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
 
@@ -76,7 +86,7 @@ def main_sdra_1_struct_node_restore(args):
     n_ex = len(processed_spider_dev)
 
     with open(result_save_path, 'a') as f:
-        for i in tqdm(range(346, n_ex), desc=f"Main loop: {exp_name}", ascii=True):
+        for i in tqdm(range(0, n_ex), desc=f"Main loop: {exp_name}", ascii=True):
             ex = processed_spider_dev[i]
             results = trace_struct_restore(
                 mt=mt_uskg,
@@ -84,6 +94,51 @@ def main_sdra_1_struct_node_restore(args):
                 subject_type=args.subject_type,
                 replace=True,
                 part=args.part,
+            )
+            dump_dict = dict(
+                ex_id=i,
+                trace_results=results,
+            )
+            f.write(json.dumps(dump_dict, indent=None) + '\n')
+
+
+def main_sdra_2_2_dirty_text_struct_restore(args):
+    """
+    Exp 2.2: Corrupt the text, restoring the struct node of interest
+    Purpose: check the pos of contextualization of text into struct nodes
+    """
+    spider_dev_path = args.spider_dev_path
+    spider_db_dir = args.spider_db_dir
+    data_cache_dir = args.data_cache_dir
+
+    exp_name = f'exp=2.2_dev_{args.subject_type}'
+    result_save_dir = os.path.join(args.result_dir, 'dirty_text_struct_restore')
+    os.makedirs(result_save_dir, exist_ok=True)
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+
+    mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
+
+    raw_spider_dev = load_raw_dataset(
+        data_filepath = spider_dev_path,
+        db_path=spider_db_dir,
+    )
+    processed_spider_dev = s2s_spider.DevDataset(
+        args=mt_uskg.task_args,
+        raw_datasets=raw_spider_dev,
+        cache_root=data_cache_dir
+    )
+    n_ex = len(processed_spider_dev)
+
+    with open(result_save_path, 'a') as f:
+        for i in tqdm(range(0, n_ex), desc=f"MAIN: {exp_name}", ascii=True):
+            ex = processed_spider_dev[i]
+            results = trace_section_corrupt_restore(
+                mt=mt_uskg,
+                ex=ex,
+                subject_type=args.subject_type,
+                replace=True,
+                # part=args.part,
+                part='encoder'
             )
             dump_dict = dict(
                 ex_id=i,
@@ -259,15 +314,18 @@ def trace_with_patch_uskg(*args, **kwargs):
 def trace_with_repatch_uskg_multi_token(
     model,  # The model
     inp,  # A set of inputs
-    states_to_patch,  # A list of (token index, layername) triples to restore
+    states_to_patch,    # A list of (token index, layername) triples to restore
     states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-    answers_t,  # Answer probabilities to collect
+    answers_t,      # Answer probabilities to collect
     tokens_to_mix,  # Range of tokens to corrupt (begin, end)
+    states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
+    tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
     tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
     noise=0.1,  # Level of noise to add
     uniform_noise=False,
     replace=False,  # True to replace with instead of add noise
     # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
+    return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
 ):
     rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
     if uniform_noise:
@@ -280,6 +338,9 @@ def trace_with_repatch_uskg_multi_token(
     unpatch_spec = defaultdict(list)
     for t, l in states_to_unpatch:
         unpatch_spec[l].append(t)
+    patch_spec_1st_pass = defaultdict(list)
+    for t, l in states_to_patch_1st_pass:
+        patch_spec_1st_pass[l].append(t)
 
     embed_layername = layername_uskg(model, "encoder", 0, "embed")
 
@@ -299,16 +360,23 @@ def trace_with_repatch_uskg_multi_token(
     else:
         tokens_to_mix_indices = list(range(*tokens_to_mix))
 
-    # Define the model-patching rule.
+    if tokens_to_mix_1st_pass is None:
+        tokens_to_mix_indices_1st_pass = None
+    elif tokens_to_mix_individual_indices:
+        tokens_to_mix_indices_1st_pass = tokens_to_mix_1st_pass
+    else:
+        tokens_to_mix_indices_1st_pass = list(range(*tokens_to_mix_1st_pass))
+
+    # Define the model-patching rule for the 2nd (main) pass.
     def patch_rep(x, layer):
         if layer == embed_layername:
             # If requested, we corrupt a range of token embeddings on batch items x[1:]
-            # YS TODO: enable passing individual indices
             if tokens_to_mix is not None:
                 # b, e = tokens_to_mix
                 # x[1:, b:e] += noise * torch.from_numpy(
                 #     prng(x.shape[0] - 1, e - b, x.shape[2])
                 # ).to(x.device)
+                # print(f'* 2nd pass, layer: {layer}, corrupting: {tokens_to_mix_indices}')
                 mix_len = len(tokens_to_mix_indices)
                 noise_data = noise_fn(
                     # torch.from_numpy(prng(x.shape[0] - 1, e - b, x.shape[2]))
@@ -325,48 +393,107 @@ def trace_with_repatch_uskg_multi_token(
         # If this layer is in the patch_spec, restore the uncorrupted hidden state
         # for selected tokens.
         h = untuple(x)
-        for t in patch_spec.get(layer, []):
+        toks_to_patch = patch_spec.get(layer, [])
+        toks_to_unpatch = unpatch_spec.get(layer, [])
+        # if toks_to_patch:
+        #     print(f'* 2nd pass, layer: {layer}, restoring: {toks_to_patch}')
+        # if toks_to_unpatch:
+        #     print(f'* 2nd pass, layer: {layer}, unpatching: {toks_to_unpatch}')
+
+        for t in toks_to_patch:
             h[1:, t] = h[0, t]
-        for t in unpatch_spec.get(layer, []):
+        for t in toks_to_unpatch:
             h[1:, t] = untuple(first_pass_trace[layer].output)[1:, t]
         return x
 
+    # Define the model-patching rule for the 1st pass.
+    def patch_rep_1st_pass(x, layer):
+        if layer == embed_layername:
+            # If requested, we corrupt a range of token embeddings on batch items x[1:]
+            if tokens_to_mix_1st_pass is not None:
+                # b, e = tokens_to_mix
+                # x[1:, b:e] += noise * torch.from_numpy(
+                #     prng(x.shape[0] - 1, e - b, x.shape[2])
+                # ).to(x.device)
+                # print(f'* 1st pass, layer: {layer}, corrupting: {tokens_to_mix_indices_1st_pass}')
+                mix_len = len(tokens_to_mix_indices_1st_pass)
+                noise_data = noise_fn(
+                    # torch.from_numpy(prng(x.shape[0] - 1, e - b, x.shape[2]))
+                    torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
+                ).to(device=x.device, dtype=x.dtype)
+
+                if replace:
+                    x[1:, tokens_to_mix_indices_1st_pass] = noise_data
+                else:
+                    x[1:, tokens_to_mix_indices_1st_pass] += noise_data
+            return x
+        # if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
+        if layer not in patch_spec_1st_pass:
+            return x
+        # If this layer is in the patch_spec, restore the uncorrupted hidden state
+        # for selected tokens.
+        h = untuple(x)
+        toks_to_patch = patch_spec_1st_pass.get(layer, [])
+        # if toks_to_patch:
+        #     print(f'* 1st pass, layer: {layer}, restoring: {toks_to_patch}')
+        for t in toks_to_patch:
+            h[1:, t] = h[0, t]
+        return x
+
+
     # With the patching rules defined, run the patched model in inference.
+    first_pass_outputs_exp = None
     for first_pass in [True, False] if states_to_unpatch else [False]:
         with torch.no_grad(), nethook.TraceDict(
             model,
-            [embed_layername] + list(patch_spec.keys()) + list(unpatch_spec.keys()),
-            edit_output=patch_rep,
+            [embed_layername] + list(patch_spec.keys()) + list(unpatch_spec.keys()) + list(patch_spec_1st_pass.keys()),
+            edit_output=patch_rep_1st_pass if first_pass else patch_rep,
         ) as td:
             # outputs_exp = model(**inp)
             outputs_exp = run_model_forward_uskg(model, **inp)
             if first_pass:
                 first_pass_trace = td
+                first_pass_outputs_exp = outputs_exp
 
     # We report softmax probabilities for the answers_t token predictions of interest.
     # probs = torch.softmax(outputs_exp.logits[1:, -1, :], dim=1).mean(dim=0)[answers_t]
     # (YS) allowing multi-token answers_t
     all_ans_probs = []
+    pass1_all_ans_probs = []
     try:
         _ = answers_t[0]
     except:
         # not sequence type, make it a list
         answers_t = [answers_t]
+
     for i, _t in enumerate(answers_t):
         # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
         probs = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
         all_ans_probs.append(probs)
 
-    return all_ans_probs
+        if return_first_pass_preds:
+            probs_1 = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
+            pass1_all_ans_probs.append(probs_1)
+
+    if return_first_pass_preds:
+        return all_ans_probs, pass1_all_ans_probs
+    else:
+        return all_ans_probs
 
 
 def trace_with_repatch_uskg(*args, **kwargs):
     """ For compatibility, make this a wrapper for trace_with_patch_uskg_multi_token """
 
     ret = trace_with_repatch_uskg_multi_token(*args, **kwargs)
-    all_ans_probs = ret
-    probs = min(all_ans_probs)
-    return probs
+    if isinstance(ret, tuple):
+        all_ans_probs, pass1_all_ans_probs = ret
+        probs = min(all_ans_probs)
+        pass1_probs = min(pass1_all_ans_probs)
+        return probs, pass1_probs
+    else:
+        all_ans_probs = ret
+        probs = min(all_ans_probs)
+        return probs
 
 
 def token_corruption_influence_uskg(
@@ -573,8 +700,9 @@ def trace_important_states_uskg(
     sever_kind=None,
 ):
     """ 
-    e_range: the tokens to corrupt (for now, it's only for encoder input. TODO: add another argument for decoder input corruption)
-    token_range: the indexes of tokens to try to restore (by default all tokens)
+    Args:
+        e_range (List[int]): the tokens to corrupt (for now, it's only for encoder input. TODO: add another argument for decoder input corruption)
+        enc|dec_token_range (List[int] or List[List[int]]): (updated) list of token ranges to try to restore (by default `None`, use all single tokens).
     """
     enc_ntoks = inp["input_ids"].shape[1]
     dec_ntoks = inp["decoder_input_ids"].shape[1]
@@ -590,21 +718,24 @@ def trace_important_states_uskg(
         enc_tqdm_pbar = tqdm(total=enc_ntoks*num_enc_layers,
                             desc="trace_important_states_uskg.encoder",
                             ascii=True)
-        enc_token_range = range(enc_ntoks)
+        # enc_token_range = range(enc_ntoks)
         # if token_range is None:
         #     token_range = range(ntoks)
         for tnum in enc_token_range:
-            ## YS TODO: finer control of states_to_repatch, i.e. layers, part, etc.
+            ## YS: now tnum can be int or list
+            ## TODO: finer control of states_to_unpatch, i.e. layers, part, etc.
+            tnum_list = ensure_list(tnum)
+
             states_to_unpatch = []
             if sever_kind in ['self_attn', 'mlp']:
-                states_to_unpatch = [(tnum, layername_uskg(model, 'encoder', l, sever_kind)) for l in range(num_enc_layers)]
+                states_to_unpatch = [(t, layername_uskg(model, 'encoder', l, sever_kind)) for l in range(num_enc_layers) for t in tnum_list]
 
             row = []
             for layer in range(num_enc_layers):
                 r = trace_with_repatch_uskg(
                     model,
                     inp=inp,
-                    states_to_patch=[(tnum, layername_uskg(model, 'encoder', layer))],
+                    states_to_patch=[(t, layername_uskg(model, 'encoder', layer)) for t in tnum_list],
                     states_to_unpatch=states_to_unpatch,
                     answers_t=answer_t,
                     tokens_to_mix=e_range,
@@ -631,20 +762,22 @@ def trace_important_states_uskg(
         dec_tqdm_pbar = tqdm(total=dec_ntoks*num_dec_layers,
                             desc="trace_important_states_uskg.decoder",
                             ascii=True)
-        dec_token_range = range(dec_ntoks)
+        # dec_token_range = range(dec_ntoks)
         # if token_range is None:
         #     token_range = range(ntoks)
         for tnum in dec_token_range:
+            tnum_list = ensure_list(tnum)
+
             states_to_unpatch = []
             if sever_kind in ['self_attn', 'cross_attn', 'mlp']:
-                states_to_unpatch = [(tnum, layername_uskg(model, 'decoder', l, sever_kind)) for l in range(num_enc_layers)]
+                states_to_unpatch = [(t, layername_uskg(model, 'decoder', l, sever_kind)) for l in range(num_enc_layers) for t in tnum_list]
 
             row = []
             for layer in range(num_dec_layers):
                 r = trace_with_repatch_uskg(
                     model,
                     inp=inp,
-                    states_to_patch=[(tnum, layername_uskg(model, 'decoder', layer))],
+                    states_to_patch=[(t, layername_uskg(model, 'decoder', layer)) for t in tnum_list],
                     states_to_unpatch=states_to_unpatch,
                     answers_t=answer_t,
                     tokens_to_mix=e_range,
@@ -780,7 +913,10 @@ def trace_struct_restore(
     window=10,
     kind=None,
 ):
-    """AAA"""
+    """
+    AAA
+    Exp1
+    """
 
     if part == 'encoder':
         enc_token_range = None
@@ -850,8 +986,102 @@ def trace_struct_restore(
         )
 
         result['target_node'] = node      # actually already available in ['answer']
+        result['db_id'] = ex['db_id']
         all_results.append(result)
     return all_results
+
+
+
+def trace_section_corrupt_restore(
+    mt,
+    ex,
+    subject_type='column',
+    corrupt_section='text', # 'text', 'struct'
+    samples=10,
+    noise=0.1,
+    part='encoder',         # For now, only 'encoder' supported for section corrupt
+    uniform_noise=False,
+    replace=True,
+    window=10,
+    kind=None,
+):
+    """
+    AAA
+    Exp 2.2
+    """
+
+    if part != 'encoder':
+        raise ValueError(part)
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+
+    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
+    enc_tokenized = mt.tokenizer(enc_sentence)
+
+    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
+    if corrupt_section == 'text':
+        corrupt_tok_indices = list(range(*text_range))
+    elif corrupt_section == 'struct':
+        corrupt_tok_indices = list(range(*struct_range))
+    else:
+        raise ValueError(corrupt_section)
+
+    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, enc_tokenized['input_ids'], struct_in)
+
+    if subject_type == 'column':
+        node_name_ranges = token_ranges_dict['col_name_ranges']
+    elif subject_type == 'table':
+        node_name_ranges = token_ranges_dict['table_name_ranges']
+    elif subject_type == 'value':
+        node_name_ranges = token_ranges_dict['val_name_ranges']
+    elif subject_type == 'db_id':
+    #     token_name_ranges = token_ranges_dict['db_id_name_ranges']
+        raise NotImplementedError('db_id is not used in sql')
+    else:
+        raise NotImplementedError(subject_type)
+
+    sql_tokens = separate_punct(ex['seq_out']).split(' ')
+    sql_nodes = set()
+    for t in sql_tokens:
+        if t in node_name_ranges:
+            sql_nodes.add(t)
+
+    all_results = []
+
+    for node in sql_nodes:
+        tok_ranges = node_name_ranges[node]
+        enc_token_range = [[i for s, e in tok_ranges for i in range(s, e)]]
+        dec_token_range = []
+
+        try:
+            dec_prompt = make_dec_prompt(ex['seq_out'], node)
+        except:
+            breakpoint()
+
+        result = calculate_hidden_flow_uskg(
+            mt,
+            enc_sentence=enc_sentence,
+            dec_prompt=dec_prompt,
+            expect=node,
+            e_range=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            samples=samples,
+            noise=noise,
+            # token_range=token_range,
+            enc_token_range=enc_token_range,
+            dec_token_range=dec_token_range,
+            uniform_noise=uniform_noise,
+            replace=replace,
+            window=window,
+            kind=kind,
+        )
+
+        result['target_node'] = node      # actually already available in ['answer']
+        result['db_id'] = ex['db_id']
+        all_results.append(result)
+    return all_results
+
 
 
 class ModelAndTokenizer_USKG:
