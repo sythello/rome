@@ -27,7 +27,8 @@ from rome.tok_dataset import (
 from util import nethook
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
-from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, load_model_uskg, load_raw_dataset, run_model_forward_uskg, \
+from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NAME, \
+    load_model_uskg, load_raw_dataset, run_model_forward_uskg, \
     decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
     separate_punct, make_dec_prompt, parse_struct_in, ensure_list
 
@@ -112,9 +113,9 @@ def main_sdra_2_2_dirty_text_struct_restore(args):
     data_cache_dir = args.data_cache_dir
 
     exp_name = f'exp=2.2_dev_{args.subject_type}'
-    result_save_dir = os.path.join(args.result_dir, 'dirty_text_struct_restore')
+    result_save_dir = os.path.join(args.result_dir, 'exp2.2_dirty_text_struct_restore')
     os.makedirs(result_save_dir, exist_ok=True)
-    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}-tmp.jsonl')
 
     mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
 
@@ -129,9 +130,10 @@ def main_sdra_2_2_dirty_text_struct_restore(args):
     )
     n_ex = len(processed_spider_dev)
 
-    with open(result_save_path, 'a') as f:
-        for i in tqdm(range(0, n_ex), desc=f"MAIN: {exp_name}", ascii=True):
+    with open(result_save_path, 'w') as f:
+        for i in tqdm(range(16, n_ex), desc=f"MAIN: {exp_name}", ascii=True):
             ex = processed_spider_dev[i]
+            breakpoint()
             results = trace_section_corrupt_restore(
                 mt=mt_uskg,
                 ex=ex,
@@ -715,7 +717,7 @@ def trace_important_states_uskg(
     if enc_token_range is None:
         enc_token_range = range(enc_ntoks)
     if len(enc_token_range) > 0:
-        enc_tqdm_pbar = tqdm(total=enc_ntoks*num_enc_layers,
+        enc_tqdm_pbar = tqdm(total=len(enc_token_range)*num_enc_layers,
                             desc="trace_important_states_uskg.encoder",
                             ascii=True)
         # enc_token_range = range(enc_ntoks)
@@ -759,7 +761,7 @@ def trace_important_states_uskg(
     if dec_token_range is None:
         dec_token_range = range(dec_ntoks)
     if len(dec_token_range) > 0:
-        dec_tqdm_pbar = tqdm(total=dec_ntoks*num_dec_layers,
+        dec_tqdm_pbar = tqdm(total=len(dec_token_range)*num_dec_layers,
                             desc="trace_important_states_uskg.decoder",
                             ascii=True)
         # dec_token_range = range(dec_ntoks)
@@ -821,7 +823,9 @@ def trace_important_window_uskg(
     enc_table = []
     dec_table = []
 
-    # YS TODO: add sever_kind
+    # YS TODO:
+    # add sever_kind
+    # support enc_token_range: List[List[int]]
 
     # (YS): Encoder part
     if enc_token_range is None:
@@ -1004,6 +1008,7 @@ def trace_section_corrupt_restore(
     replace=True,
     window=10,
     kind=None,
+    remove_struct_duplicate_cols=True,     # If True, remove column names appearing multiple times in struct
 ):
     """
     AAA
@@ -1018,6 +1023,15 @@ def trace_section_corrupt_restore(
 
     enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
     enc_tokenized = mt.tokenizer(enc_sentence)
+
+    parsed_struct_in = parse_struct_in(struct_in)
+    col2table = defaultdict(list)
+    db_id_t, tables = parsed_struct_in
+    for table_name_t, cols in tables:
+        for col_name_t, vals in cols:
+            _, table_name, _ = table_name_t
+            _, col_name, _ = col_name_t
+            col2table[col_name].append(table_name)
 
     text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
     if corrupt_section == 'text':
@@ -1046,12 +1060,18 @@ def trace_section_corrupt_restore(
     for t in sql_tokens:
         if t in node_name_ranges:
             sql_nodes.add(t)
+    
+    if subject_type == 'column':
+        for t in list(sql_nodes):
+            if len(col2table[t]) == 0:
+                raise ValueError(struct_in, t)
+            elif (len(col2table[t]) > 1) and remove_struct_duplicate_cols:
+                sql_nodes.remove(t)
 
     all_results = []
-
     for node in sql_nodes:
         tok_ranges = node_name_ranges[node]
-        enc_token_range = [[i for s, e in tok_ranges for i in range(s, e)]]
+        enc_token_range = [[i for s, e in tok_ranges for i in range(s, e)]]     # full token range as a single item, to restore simultaneously
         dec_token_range = []
 
         try:
@@ -1079,6 +1099,7 @@ def trace_section_corrupt_restore(
 
         result['target_node'] = node      # actually already available in ['answer']
         result['db_id'] = ex['db_id']
+        result['enc_token_range'] = enc_token_range
         all_results.append(result)
     return all_results
 

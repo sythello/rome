@@ -52,6 +52,61 @@ from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
 USKG_SPLITTER = '; structed knowledge: '
 USKG_SPLITTER_CHARS = ';structedknowledge:'
 
+RAT_SQL_RELATION_ID2NAME = {
+    0: ('qq_dist', -2),
+    1: ('qq_dist', -1),
+    2: ('qq_dist', 0),
+    3: ('qq_dist', 1),
+    4: ('qq_dist', 2),
+    5: 'qc_default',
+    6: 'qt_default',
+    7: 'cq_default',
+    8: 'cc_default',
+    9: 'cc_foreign_key_forward',
+    10: 'cc_foreign_key_backward',
+    11: 'cc_table_match',
+    12: ('cc_dist', -2),
+    13: ('cc_dist', -1),
+    14: ('cc_dist', 0),
+    15: ('cc_dist', 1),
+    16: ('cc_dist', 2),
+    17: 'ct_default',
+    18: 'ct_foreign_key',
+    19: 'ct_primary_key',
+    20: 'ct_table_match',
+    21: 'ct_any_table',
+    22: 'tq_default',
+    23: 'tc_default',
+    24: 'tc_primary_key',
+    25: 'tc_table_match',
+    26: 'tc_any_table',
+    27: 'tc_foreign_key',
+    28: 'tt_default',
+    29: 'tt_foreign_key_forward',
+    30: 'tt_foreign_key_backward',
+    31: 'tt_foreign_key_both',
+    32: ('tt_dist', -2),
+    33: ('tt_dist', -1),
+    34: ('tt_dist', 0),
+    35: ('tt_dist', 1),
+    36: ('tt_dist', 2),
+    37: 'qcCEM',
+    38: 'cqCEM',
+    39: 'qtTEM',
+    40: 'tqTEM',
+    41: 'qcCPM',
+    42: 'cqCPM',
+    43: 'qtTPM',
+    44: 'tqTPM',
+    45: 'qcNUMBER',
+    46: 'cqNUMBER',
+    47: 'qcTIME',
+    48: 'cqTIME',
+    49: 'qcCELLMATCH',
+    50: 'cqCELLMATCH'
+}
+
+
 def load_model_uskg(model_name, untie_embeddings=False):
     save_argv = sys.argv
 
