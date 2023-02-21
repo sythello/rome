@@ -135,10 +135,10 @@ def load_model_uskg(model_name, untie_embeddings=False):
     sys.argv = save_argv
 
     # Tokenizer: 'fast' for word/token/char mapping functions
-    # tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-    print('Using tokenizer:', model_args.bert.location)
-    tokenizer_fast = AutoTokenizer.from_pretrained(
-        model_args.bert.location, use_fast=True)
+    print('Using tokenizer_uskg:', model_path)
+    tokenizer_uskg = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    print('Using tokenizer_fast:', model_args.bert.location)
+    tokenizer_fast = AutoTokenizer.from_pretrained(model_args.bert.location, use_fast=True)
 
     # Model: for model_path, now support: USKG (hkunlp/xxx); original T5 (t5-xxx); random T5 (t5-xxx-rd)
     # model_path = main_args.model_path
@@ -175,7 +175,7 @@ def load_model_uskg(model_name, untie_embeddings=False):
         # model.pretrain_model.decoder.embed_tokens = (model.pretrain_model.shared.weight.clone())
         model.pretrain_model.decoder.embed_tokens = copy.deepcopy(model.pretrain_model.encoder.embed_tokens)
 
-    return model, tokenizer_fast, training_args, model_args, task_args
+    return model, tokenizer_uskg, tokenizer_fast, training_args, model_args, task_args
 
 
 def load_raw_dataset(data_filepath, db_path, schema_cache=None):
@@ -383,7 +383,7 @@ def parse_struct_in(struct_in):
 
 def find_struct_name_ranges(tokenizer, token_array, struct_in):
     """ 
-    (Need to pass struct_in since it's easier to parse then the string reconstructed by tokenizer)
+    (Need to pass struct_in since it's easier to parse than the string reconstructed by tokenizer)
 
     YS TODO: allowing specifying the table name of the column to select a specific column from all with the same name
     """

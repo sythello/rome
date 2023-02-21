@@ -509,7 +509,10 @@ def token_corruption_influence_uskg(
     expect=None,
     device="cuda",
 ):
-    """ Check corrupting each token does how much negative influence on prediction acc """
+    """ 
+    AAA
+    Check corrupting each token does how much negative influence on prediction acc 
+    """
     inp = make_inputs_t5(
         mt.tokenizer,
         [enc_sentence] * (samples + 1),
@@ -549,11 +552,19 @@ def token_corruption_influence_uskg(
         ).item()
 
         res.append({
+            'corrpt_type': 'token',
             'corrpt_idx': corrpt_idx,
             'corrpt_token': input_tokens[corrpt_idx],
             'corrpt_score': low_score,
             'corrpt_drop': base_score - low_score,
         })
+
+    # Full node
+    struct_range_dict = find_struct_name_ranges(
+        tokenizer=mt.tokenizer, 
+        token_array=mt.tokenizer(enc_sentence),
+        struct_in=enc_sentence.split(USKG_SPLITTER)[1])
+
     return res
 
 
@@ -1114,8 +1125,8 @@ class ModelAndTokenizer_USKG:
     def __init__(
         self,
         model_name=None,
-        model=None,
-        tokenizer=None,
+        # model=None,
+        # tokenizer=None,
         training_args=None,
         model_args=None,
         task_args=None,
@@ -1134,12 +1145,13 @@ class ModelAndTokenizer_USKG:
         #     nethook.set_requires_grad(False, model)
         #     model.eval().cuda()
 
-        if (model is None) or (tokenizer is None):
-            assert model_name is not None
-            model, tokenizer, training_args, model_args, task_args = load_model_uskg(model_name, untie_embeddings=True)
+        # if (model is None) or (tokenizer is None):
+        assert model_name is not None
+        model, tokenizer_uskg, tokenizer_fast, training_args, model_args, task_args = load_model_uskg(model_name, untie_embeddings=True)
         model = model.eval().to(device=device)
 
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer_fast
+        self.tokenizer_uskg = tokenizer_uskg
         self.model = model
         self.training_args = training_args
         self.model_args = model_args
