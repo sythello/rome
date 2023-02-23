@@ -106,6 +106,8 @@ RAT_SQL_RELATION_ID2NAME = {
     50: 'cqCELLMATCH'
 }
 
+REL2ID = {v : k for k, v in RAT_SQL_RELATION_ID2NAME.items()}
+
 
 def load_model_uskg(model_name, untie_embeddings=False):
     save_argv = sys.argv
@@ -353,7 +355,8 @@ def parse_struct_in(struct_in):
         for m in re.finditer(val_split_pattern, cols_str):
             s, e = m.span()
             val_split_ranges.append((s, e))
-            cols_str = cols_str[:s] + cols_str[s:e].replace(',', '@') + cols_str[e:]
+            # Must be ' , ' instead of ',' because there are values with ',' such as "Louisville, Kentucky" in shop_membership
+            cols_str = cols_str[:s] + cols_str[s:e].replace(' , ', ' @ ') + cols_str[e:]
 
         cols = cols_str.split(' , ')
         parsed_cols = []
@@ -381,12 +384,24 @@ def parse_struct_in(struct_in):
     return db_id_t, parsed_struct
 
 
-def find_struct_name_ranges(tokenizer, token_array, struct_in):
+# def find_struct_name_ranges(tokenizer, token_array, struct_in):
+def find_struct_name_ranges(tokenizer, ex):
     """ 
+    Need ex keys:
+        struct_in, enc_sentence
     (Need to pass struct_in since it's easier to parse than the string reconstructed by tokenizer)
 
     YS TODO: allowing specifying the table name of the column to select a specific column from all with the same name
     """
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+    if 'enc_sentence' not in ex:
+        ex['enc_sentence'] = f"{text_in}; structed knowledge: {struct_in}"
+
+    token_array = tokenizer(ex['enc_sentence'])['input_ids']
+    
+
     # sentence = decode_sentences(tokenizer, token_array)
     # assert USKG_SPLITTER in sentence, f'"{sentence}" does not have splitter {USKG_SPLITTER}'
     # # select the struct_in part
@@ -428,12 +443,19 @@ def find_struct_name_ranges(tokenizer, token_array, struct_in):
             for val_t in vals:
                 _add_t(val_t, val_name_ranges)
 
-    return dict(
+    struct_node_ranges_dict = dict(
         db_id_ranges=db_id_ranges,
         table_name_ranges=table_name_ranges,
         col_name_ranges=col_name_ranges,
         val_name_ranges=val_name_ranges,
     )
+
+    ex['text_range'] = text_range
+    ex['struct_range'] = struct_range
+    ex['struct_node_ranges_dict'] = struct_node_ranges_dict
+
+    return struct_node_ranges_dict
+
 
 def make_dec_prompt(dec_target, subject):
     dec_target = ' ' + dec_target + ' '  # to avoid the matching problems at the ends 
@@ -451,3 +473,47 @@ def ensure_list(x):
         # singleton
         x = [x]
     return x
+
+def check_text_match(spider_ex, col, tab=None):
+    # col = result_d['expect']
+    # tab = result_d['table']
+    # node_name = f'<C>{tab}::{col}'
+    nodes = spider_ex['rat_sql_graph']['nodes']
+    
+    """ TODO: if tab not given, infer from parsed_struct_in (first appearing col name) """
+    if tab is None:
+        raise NotImplementedError
+    
+    struct_in = spider_ex['struct_in']
+    
+    # use struct_in to find column id in table and table id; use these to index ratsql node
+    db_id, tables = parse_struct_in(spider_ex['struct_in'])
+    for tid, (tab_name_t, cols) in enumerate(tables):
+        if tab_name_t[1] != tab:
+            continue
+        for cid, (col_name_t, vals) in enumerate(cols):
+            if col_name_t[1] != col:
+                continue
+            # Found the node table/column; save them 
+            node_tid = tid
+            node_cid = cid
+            break
+            
+    all_tab_nodes = [n for n in nodes if n.startswith('<T>')]
+    tab_node = all_tab_nodes[node_tid]
+    ratsql_tab_name = tab_node.split('<T>')[1]
+    tab_prefix = f'<C>{ratsql_tab_name}::'
+    tab_all_col_nodes = [n for n in nodes if n.startswith(tab_prefix)]
+    col_node = tab_all_col_nodes[node_cid]
+    node_idx = nodes.index(col_node)
+    
+    rel_matrix = json.loads(spider_ex['rat_sql_graph']['relations'])
+    rel_row = rel_matrix[node_idx]
+    
+    if REL2ID['cqCEM'] in rel_row:
+        return 'exact'
+    elif REL2ID['cqCPM'] in rel_row:
+        return 'partial'
+    else:
+        return 'no-match'
+    
