@@ -28,9 +28,11 @@ from util import nethook
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NAME, \
-    load_model_uskg, load_raw_dataset, run_model_forward_uskg, \
+    load_model_uskg, load_raw_dataset, load_spider_dataset, run_model_forward_uskg, \
     decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
-    separate_punct, make_dec_prompt, parse_struct_in, ensure_list, check_text_match
+    separate_punct, make_dec_prompt, parse_struct_in, ensure_list, \
+    ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
+    evaluate_hardness, detect_node_role, check_col_text_match, check_table_text_match
 
 from transformers import (
     HfArgumentParser,
@@ -44,6 +46,7 @@ from uskg.utils.configue import Configure
 from uskg.utils.training_arguments import WrappedSeq2SeqTrainingArguments
 from uskg.seq2seq_construction import spider as s2s_spider
 from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
+from uskg.third_party.spider import evaluation as sp_eval
 
 
 def trace_with_patch_uskg_multi_token(
@@ -175,11 +178,12 @@ def trace_with_patch_uskg_multi_token(
     # We report softmax probabilities for the answers_t token predictions of interest.
     # (YS) allowing multi-token answers_t
     all_ans_probs = []
-    try:
-        _ = answers_t[0]
-    except:
-        # not sequence type, make it a list
-        answers_t = [answers_t]
+    # try:
+    #     _ = answers_t[0]
+    # except:
+    #     # not sequence type, make it a list
+    #     answers_t = [answers_t]
+    answers_t = ensure_list(answers_t)
     for i, _t in enumerate(answers_t):
         # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
         probs = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
@@ -359,11 +363,12 @@ def trace_with_repatch_uskg_multi_token(
     # (YS) allowing multi-token answers_t
     all_ans_probs = []
     pass1_all_ans_probs = []
-    try:
-        _ = answers_t[0]
-    except:
-        # not sequence type, make it a list
-        answers_t = [answers_t]
+    # try:
+    #     _ = answers_t[0]
+    # except:
+    #     # not sequence type, make it a list
+    #     answers_t = [answers_t]
+    answers_t = ensure_list(answers_t)
 
     for i, _t in enumerate(answers_t):
         # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
@@ -896,10 +901,6 @@ def trace_important_window_uskg(
     return enc_table_pt, dec_table_pt
 
 
-def make_input_struct_corrupt():
-    NotImplemented
-
-
 def trace_struct_restore(
     mt,
     ex,
@@ -911,14 +912,15 @@ def trace_struct_restore(
     replace=True,
     window=10,
     kind=None,
+    remove_struct_duplicate_cols=True,
 ):
     """
     AAA
-    Exp1
+    Exp1 (single struct node restore)
     """
 
     if part == 'encoder':
-        enc_token_range = None
+        enc_token_range = None      # None means 'all', [] means 'nothing'
         dec_token_range = []
     elif part == 'decoder':
         enc_token_range = []
@@ -929,45 +931,17 @@ def trace_struct_restore(
     else:
         raise ValueError(part)
 
-    text_in = ex['text_in']
-    struct_in = ex['struct_in']
-
-    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-    enc_tokenized = mt.tokenizer(enc_sentence)
-
-    # token_ranges_dict = find_struct_name_ranges(mt.tokenizer, enc_tokenized['input_ids'], struct_in)
-    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
-
-    if subject_type == 'column':
-        node_name_ranges = token_ranges_dict['col_name_ranges']
-    elif subject_type == 'table':
-        node_name_ranges = token_ranges_dict['table_name_ranges']
-    elif subject_type == 'value':
-        node_name_ranges = token_ranges_dict['val_name_ranges']
-    elif subject_type == 'db_id':
-    #     token_name_ranges = token_ranges_dict['db_id_name_ranges']
-        raise NotImplementedError('db_id is not used in sql')
-    else:
-        raise NotImplementedError(subject_type)
-
-    sql_tokens = separate_punct(ex['seq_out']).split(' ')
-    sql_nodes = set()
-    for t in sql_tokens:
-        if t in node_name_ranges:
-            sql_nodes.add(t)
+    analysis_samples = create_analysis_sample_dicts(mt, ex, subject_type, remove_struct_duplicate_cols)
 
     all_results = []
-
-    for node in sql_nodes:
-        tok_ranges = node_name_ranges[node]
+    for a_ex in analysis_samples:
+        tok_ranges = a_ex['expect_input_ranges']
         tok_indices = [i for s, e in tok_ranges for i in range(s, e)]
+        enc_sentence = a_ex['enc_sentence']
+        dec_prompt = a_ex['dec_prompt']
+        node = a_ex['expect']
 
-        try:
-            dec_prompt = make_dec_prompt(ex['seq_out'], node)
-        except:
-            breakpoint()
-
-        result = calculate_hidden_flow_uskg(
+        trace_result = calculate_hidden_flow_uskg(
             mt,
             enc_sentence=enc_sentence,
             dec_prompt=dec_prompt,
@@ -985,11 +959,15 @@ def trace_struct_restore(
             kind=kind,
         )
 
-        result['expect'] = node      # actually already available in ['answer']
-        result['db_id'] = ex['db_id']
+        result = make_basic_result_dict(a_ex)
+        for k, v in trace_result.items():
+            if k not in result:
+                result[k] = v
+            else:
+                assert result[k] == v, (result[k], v)
+
         all_results.append(result)
     return all_results
-
 
 
 def trace_section_corrupt_restore(
@@ -1109,127 +1087,251 @@ def trace_section_corrupt_restore(
     return all_results
 
 
-class ModelAndTokenizer_USKG:
+def trace_exp2_text_struct(
+    mt,
+    ex,
+):
     """
-    An object to hold on to (or automatically download and hold)
-    a USKG model and tokenizer.  Counts the number of layers.
+    AAAA
+    Exp2
+    ex (Dict): analysis_sample (a_ex) with `add_clean_prediction()`
     """
 
-    def __init__(
-        self,
-        model_name=None,
-        # model=None,
-        # tokenizer=None,
-        training_args=None,
-        model_args=None,
-        task_args=None,
-        low_cpu_mem_usage=False,
-        torch_dtype=None,
-        device="cuda",
-    ):
-        # if tokenizer is None:
-        #     assert model_name is not None
-        #     tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # if model is None:
-        #     assert model_name is not None
-        #     model = AutoModelForSeq2SeqLM.from_pretrained(
-        #         model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
-        #     )
-        #     nethook.set_requires_grad(False, model)
-        #     model.eval().cuda()
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+    enc_sentence = ex['enc_sentence']
+    enc_tokenized = ex['enc_tokenized']
+    text_range = ex['text_range']
+    struct_range = ex['struct_range']
 
-        # if (model is None) or (tokenizer is None):
-        assert model_name is not None
-        model, tokenizer_uskg, tokenizer_fast, training_args, model_args, task_args = load_model_uskg(model_name, untie_embeddings=True)
-        model = model.eval().to(device=device)
+    expect = ex['expect']
+    # dec_prompt = make_dec_prompt(ex['seq_out'], expect)
+    dec_prompt = ex['dec_prompt']
 
-        self.tokenizer = tokenizer_fast
-        self.tokenizer_uskg = tokenizer_uskg
-        self.model = model
-        self.training_args = training_args
-        self.model_args = model_args
-        self.task_args = task_args
-        # Layer names in model:
-        # encoder.embed_tokens
-        # encoder.block.2
-        # encoder.block.2.layer.0.SelfAttention
-        # encoder.block.2.layer.1.DenseReluDense
-        # decoder.embed_tokens
-        # decoder.block.2
-        # decoder.block.2.layer.0.SelfAttention
-        # decoder.block.2.layer.1.EncDecAttention
-        # decoder.block.2.layer.2.DenseReluDense
-        self.enc_layer_names = [
-            n
-            for n, m in model.named_modules()
-            if (re.match(r"^pretrain_model\.encoder\.block\.\d+$", n))
-        ]
-        self.dec_layer_names = [
-            n
-            for n, m in model.named_modules()
-            if (re.match(r"^pretrain_model\.decoder\.block\.\d+$", n))
-        ]
-        self.layer_names = self.enc_layer_names + self.dec_layer_names
+    parsed_struct_in = ex['parsed_struct_in']
+    col2table = ex['col2table']
+    node_name_ranges = ex['node_name_ranges']
+    subject_type = ex['expect_type']
+    expect_input_ranges = ex['expect_input_ranges']
 
-        self.num_enc_layers = len(self.enc_layer_names)
-        self.num_dec_layers = len(self.dec_layer_names)
-        self.num_layers = len(self.layer_names)
-        
-
-    def __repr__(self):
-        return (
-            f"ModelAndTokenizer_USKG(model: {type(self.model).__name__} "
-            f"[{self.num_layers} layers], "
-            f"tokenizer: {type(self.tokenizer).__name__})"
-        )
-
-
-def layername_uskg(model, part, num, kind=None):
-    """
-    part: encoder / decoder
-    num: layer number
-    kind: embed / self_attn / cross_attn / mlp / None
-    """
-    # if hasattr(model, "transformer"):
-    #     if kind == "embed":
-    #         return "transformer.wte"
-    #     return f'transformer.h.{num}{"" if kind is None else "." + kind}'
-    # if hasattr(model, "gpt_neox"):
-    #     if kind == "embed":
-    #         return "gpt_neox.embed_in"
-    #     if kind == "attn":
-    #         kind = "attention"
-    #     return f'gpt_neox.layers.{num}{"" if kind is None else "." + kind}'
-    assert hasattr(model.pretrain_model, part), f"{part} not in the model.pretrain_model of type {type(model.pretrain_model)}"
-
-    # Layer names
-    # decoder.block.2
-    # decoder.block.2.layer.0.SelfAttention
-    # decoder.block.2.layer.1.EncDecAttention
-    # decoder.block.2.layer.2.DenseReluDense
-
-    if kind == "embed":
-        return f"pretrain_model.{part}.embed_tokens"
-
-    _kind = None
-    if kind == "self_attn":
-        _kind = "layer.0.SelfAttention"
-    elif kind == "cross_attn":
-        assert part == "decoder", f"model {part} doesn't have {kind}"
-        _kind = "layer.1.EncDecAttention"
-    elif kind == "mlp":
-        if part == "encoder":
-            _kind = "layer.1.DenseReluDense"
-        elif part == "decoder":
-            _kind = "layer.2.DenseReluDense"
+    if len(expect_input_ranges) > 1:
+        assert not ex['remove_struct_duplicate_cols']
+        raise NotImplementedError
     
-    return f"pretrain_model.{part}.block.{num}{'' if _kind is None else '.' + _kind}"
+    node_range, = expect_input_ranges
 
+    struct_no_node_toks = [tnum for tnum in range(*struct_range) if tnum not in range(*node_range)]
+    
+    result = make_basic_result_dict(ex)
+    result['mutual_scores'] = dict()
 
-# def guess_subject(prompt):
-#     return re.search(r"(?!Wh(o|at|ere|en|ich|y) )([A-Z]\S*)(\s[A-Z][a-z']*)*", prompt)[
-#         0
-#     ].strip()
+    inp = make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * 11,
+        [dec_prompt] * 11,
+        answer=expect)
+
+    encoder_text_last_layer_states = [
+        (tnum, layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1))
+        for tnum in range(*text_range)
+    ]
+    encoder_struct_last_layer_states = [
+        (tnum, layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1))
+        for tnum in range(*struct_range)
+    ]
+    encoder_node_last_layer_states = [
+        (tnum, layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1))
+        for tnum in range(*node_range)
+    ]
+    encoder_struct_no_node_last_layer_states = [
+        (tnum, layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1))
+        for tnum in struct_no_node_toks
+    ]
+
+    # answer_len = len(mt.tokenizer.tokenize(expect))
+    # answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt.model, inp, pred_len=answer_len)]
+    # base_score = min(base_score).item()
+    # answer = decode_sentences(mt.tokenizer, answers_t)
+    
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = ex['base_score']
+    is_correct_pred = result['correct_prediction']
+    
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    """ Starting Exp2.1.1: finer grained text struct mutual """
+    result['mutual_scores']['clean_t-clean_s'] = base_score
+    
+    # equivalent to restore_text
+    result['mutual_scores']['clean_t-dc_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_text_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=text_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    result['mutual_scores']['clean_t-dirty_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_text_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=struct_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    result['mutual_scores']['dc_t-clean_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_struct_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=struct_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    ## For exp-2.1: mutual corruption
+    # First pass: corrupt text (no restore)
+    # Second pass: corrupt struct, no restore, reset struct output to first pass
+    result['mutual_scores']['dc_t-dc_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=[],
+        states_to_unpatch=encoder_struct_last_layer_states,
+        answers_t=answers_t,
+        tokens_to_mix_1st_pass=text_range,
+        tokens_to_mix=struct_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    result['mutual_scores']['dc_t-dirty_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=[],
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=struct_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    # equivalent to restore_struct
+    result['mutual_scores']['dirty_t-clean_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_struct_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=text_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    # equivalent to low_score (for text corruption)
+    result['mutual_scores']['dirty_t-dc_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=[],
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=text_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    result['mutual_scores']['dirty_t-dirty_s'] = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=[],
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=list(range(*text_range)) + list(range(*struct_range)),
+        tokens_to_mix_individual_indices=True,
+        replace=True,
+    ).item()
+    
+    # for k in mutual_scores_dict:
+    #     mutual_scores_dict[k].append(result['mutual_scores'][k])
+    
+    """ Starting Exp2: dirty text recovery """
+    result['base_score'] = result['mutual_scores']['clean_t-clean_s']
+    low_score = result['low_score'] = result['mutual_scores']['dirty_t-dc_s']
+    # if base_score < 0.5:
+    if answer.strip() != expect:
+        assert False, "Incorrect prediction should already been skipped!"
+    #     n_too_hard += 1
+    #     result['is_good_sample'] = False
+    #     ex_results.append(result)
+    #     continue
+    
+    ## Corrupting text: expect wrong pred 
+    if base_score - low_score < 0.5:
+        # n_too_easy += 1
+        result['is_good_sample'] = False
+        return result
+    
+    # n_good_samples += 1
+    result['is_good_sample'] = True
+    
+    ## Restoring text encoding for decoder, but struct encoding are with dirty text encoding 
+    r_text_score = result['mutual_scores']['clean_t-dc_s']
+    
+    ## Restoring clean struct encoding but dirty text encoding for decoder
+    r_struct_score = result['mutual_scores']['dirty_t-clean_s']
+    
+    ## Restoring clean node_name encoding but dirty text encoding for decoder (stricter than above)
+    r_node_score = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_node_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=text_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+
+    ## Restoring struct except column of interest. Check contextualization of this column into other nodes
+    r_struct_no_node_score = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_struct_no_node_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=text_range,
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+
+    ## Restoring clean col_name encoding; corrupt all tokens. Check if only this column is enough 
+    r_node_corrupt_all_score = trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=encoder_node_last_layer_states,
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=(0, struct_range[1]),
+        tokens_to_mix_individual_indices=False,
+        replace=True,
+    ).item()
+    
+    result['r_text_score'] = r_text_score
+    result['r_struct_score'] = r_struct_score
+    result['r_node_score'] = r_node_score
+    result['r_struct_no_node_score'] = r_struct_no_node_score
+    result['r_node_corrupt_all_score'] = r_node_corrupt_all_score
+    return result
 
 
 def plot_hidden_flow_uskg(
@@ -1531,21 +1633,187 @@ def collect_embedding_tdist(mt, degree=3):
     return normal_to_student
 
 
-def load_spider_dataset(args, mt):
-    raw_spider_dataset = load_raw_dataset(
-        data_filepath = args.spider_dataset_path,
-        db_path=args.spider_db_dir,
-    )
-    if args.ds == 'train':
-        dataset_cls = s2s_spider.TrainDataset
+def create_analysis_sample_dicts(
+        mt, 
+        ex, 
+        subject_type,
+        remove_struct_duplicate_cols=True):
+    """
+    BBB
+    Create a new sample dict or analysis purpose 
+    Return:
+        analysis_ex_dicts: all basic info needed for any analysis
+    """
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+
+    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
+    enc_tokenized = mt.tokenizer(enc_sentence)
+    ex['enc_sentence'] = enc_sentence
+    ex['enc_tokenized'] = enc_tokenized
+
+    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
+    ex['text_range'] = text_range
+    ex['struct_range'] = struct_range
+    
+    parsed_struct_in = parse_struct_in(struct_in)
+    col2table = defaultdict(list)
+    db_id_t, tables = parsed_struct_in
+    for table_name_t, cols in tables:
+        for col_name_t, vals in cols:
+            _, table_name, _ = table_name_t
+            _, col_name, _ = col_name_t
+            col2table[col_name].append(table_name)
+
+    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
+    if subject_type == 'column':
+        node_name_ranges = token_ranges_dict['col_name_ranges']
+    elif subject_type == 'table':
+        node_name_ranges = token_ranges_dict['table_name_ranges']
     else:
-        dataset_cls = s2s_spider.DevDataset
-    processed_spider_dataset = dataset_cls(
-        args=mt.task_args,
-        raw_datasets=raw_spider_dataset,
-        cache_root=args.data_cache_dir
+        raise NotImplementedError(subject_type)
+    
+    sql_tokens = separate_punct(ex['seq_out']).split(' ')
+    sql_nodes = set()
+    for t in sql_tokens:
+        if t in node_name_ranges:
+            sql_nodes.add(t)
+    
+    if subject_type == 'column':
+        for t in list(sql_nodes):
+            if len(col2table[t]) == 0:
+                raise ValueError(struct_in, t)
+            elif (len(col2table[t]) > 1) and remove_struct_duplicate_cols:
+                sql_nodes.remove(t)
+    
+    # Add hardness info
+    sql_hardness = evaluate_hardness(ex['seq_out'], ex['db_id'])
+
+    analysis_ex_dicts =[]
+    for node in sql_nodes:
+        expect = node
+        expect_input_ranges = node_name_ranges[node]
+        dec_prompts = make_dec_prompt(ex['seq_out'], expect)
+        
+        for dec_prompt in dec_prompts:
+            # Add role / text-match info
+            node_role = detect_node_role(dec_prompt)
+            if subject_type == 'column':
+                node_table = col2table[node][0]
+                text_match = check_col_text_match(ex, node, node_table)
+            else:
+                # subject_type == Table
+                text_match = check_table_text_match(ex, node)
+
+            _ex = copy.deepcopy(ex)
+            _ex['dec_prompt'] = dec_prompt
+            _ex['expect'] = expect
+            _ex['expect_type'] = subject_type
+            _ex['remove_struct_duplicate_cols'] = remove_struct_duplicate_cols
+            _ex['parsed_struct_in'] = parsed_struct_in
+            _ex['col2table'] = col2table
+            _ex['token_ranges_dict'] = token_ranges_dict
+            _ex['node_name_ranges'] = node_name_ranges
+            _ex['expect_input_ranges'] = expect_input_ranges    # [(s, e), ...]
+
+            _ex['category'] = {
+                'sql_hardness': sql_hardness,
+                'node_role': node_role,
+                'text_match': text_match,
+            }
+
+            analysis_ex_dicts.append(_ex)
+
+        # result['expect'] = node      # actually already available in ['answer']
+        # result['subject_type'] = subject_type
+        # if subject_type == 'column':
+        #     result['table'] = col2table[node][0]    # col2table[node] is a list
+        # elif subject_type == 'table':
+        #     result['table'] = node
+        # result['db_id'] = ex['db_id']
+        # result['expect_input_indices'] = enc_token_range
+    return analysis_ex_dicts
+
+
+def add_clean_prediction(
+        mt,
+        a_ex,
+        samples=10,
+        device='cuda'):
+    """
+    Called after `create_analysis_sample_dicts()` to add keys about clean prediction 
+    Args:
+        a_ex (Dict): analysis_ex, output from `create_analysis_sample_dicts()`
+    """
+
+    a_ex = copy.deepcopy(a_ex)
+
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    inp = make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * (samples + 1),
+        [dec_prompt] * (samples + 1),
+        answer=expect,
+        device=device
     )
-    return processed_spider_dataset
+    answer_len = 1
+    if expect is not None:
+        answer_len = len(mt.tokenizer.tokenize(expect))
+    with torch.no_grad():
+        answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt.model, inp, pred_len=answer_len)]
+    base_score = base_score.min().item()
+    # [answer] = decode_tokens(mt.tokenizer, [answer_t])
+    answer = decode_sentences(mt.tokenizer, answers_t)
+    is_correct_pred = (answer.strip() == expect)
+
+    a_ex['answer_len'] = answer_len
+    a_ex['base_score'] = base_score
+    a_ex['answers_t'] = answers_t
+    a_ex['answer'] = answer
+    a_ex['correct_prediction'] = is_correct_pred
+
+    return a_ex
+
+
+def make_basic_result_dict(a_ex):
+    """
+    Create a basic result dict to include basic information (shared across tasks)
+    Args:
+        a_ex (Dict): analysis_ex, output from `create_analysis_sample_dicts()` and `add_clean_prediction()`
+    """
+
+    result_dict = {
+        'enc_sentence': a_ex['enc_sentence'],
+        'seq_out': a_ex['seq_out'],
+        'dec_prompt': a_ex['dec_prompt'],
+        'expect': a_ex['expect'],
+        'expect_type': a_ex['expect_type'],
+        'db_id': a_ex['db_id'],
+        'expect_input_ranges': a_ex['expect_input_ranges'],
+    }
+
+    node = a_ex['expect']
+    col2table = a_ex['col2table']
+    if a_ex['expect_type'] == 'column':
+        # col2table[node] is a list. TODO: deal with duplicated column names
+        result_dict['expect_table'] = col2table[node][0]
+    elif a_ex['expect_type'] == 'table':
+        result_dict['expect_table'] = node
+    
+    if 'answer' in a_ex:
+        result_dict['answer'] = a_ex['answer']
+        result_dict['base_score'] = a_ex['base_score']
+        result_dict['answers_t'] = a_ex['answers_t'].detach().cpu().numpy().tolist()
+        result_dict['correct_prediction'] = a_ex['correct_prediction']
+    
+    if 'category' in a_ex:
+        result_dict['category'] = a_ex['category']
+
+    return result_dict
 
 
 def main_sdra_1_struct_node_restore(args):
@@ -1557,26 +1825,20 @@ def main_sdra_1_struct_node_restore(args):
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'dev_{args.subject_type}_{args.part}'
+    exp_name = f'dev_{args.subject_type}_{args.part}-tmp'
     result_save_dir = os.path.join(args.result_dir, 'struct_node_restore')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
 
     mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
 
-    raw_spider_dataset = load_raw_dataset(
-        data_filepath = spider_dataset_path,
-        db_path=spider_db_dir,
-    )
-    processed_spider_dataset = s2s_spider.DevDataset(
-        args=mt_uskg.task_args,
-        raw_datasets=raw_spider_dataset,
-        cache_root=data_cache_dir
-    )
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
     n_ex = len(processed_spider_dataset)
 
-    with open(result_save_path, 'a') as f:
-        for i in tqdm(range(0, n_ex), desc=f"Main loop: {exp_name}", ascii=True):
+    start_id = 0
+    end_id = 10
+    with open(result_save_path, 'w') as f:
+        for i in tqdm(range(start_id, end_id), desc=f"Main loop: {exp_name}", ascii=True):
             ex = processed_spider_dataset[i]
             results = trace_struct_restore(
                 mt=mt_uskg,
@@ -1594,6 +1856,7 @@ def main_sdra_1_struct_node_restore(args):
 
 def main_sdra_2_text_struct_interaction(args):
     """ 
+    AAAA
     Exp2 (text struct interaction): corrupt text (or struct/all), restore the *final* encoding
         of different parts to check recovery effect
     Adapted from notebook.
@@ -1613,7 +1876,7 @@ def main_sdra_2_text_struct_interaction(args):
     # Stats
     total_samples = 0
     n_good_samples = 0
-    n_too_hard = 0      # base score < 0.5
+    n_too_hard = 0      # incorrect
     n_too_easy = 0      # base > 0.5, base - low < 0.5
 
     base_scores = []
@@ -1640,332 +1903,72 @@ def main_sdra_2_text_struct_interaction(args):
         for struct in ['clean_s', 'dc_s', 'dirty_s']
     }
 
-    f = open(res_save_path, 'a')
+    f = open(res_save_path, 'w')
     start_id = 0
     end_id = n_ex
-    for ex_id in tqdm(range(start_id, end_id), desc=f"MAIN: {exp_name}", ascii=True):
+    stride = 33
+    for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
         # DEBUG
-        print(f'** DEBUG info:')
-        print(f'** ex_id = {ex_id}')
-        _mem_r = torch.cuda.memory_reserved(0)
-        _mem_a = torch.cuda.memory_allocated(0)
-        print(f'** mem reserved: {_mem_r}')
-        print(f'** mem allocated: {_mem_a}')
+        # print(f'** DEBUG info:')
+        # print(f'** ex_id = {ex_id}')
+        # _mem_r = torch.cuda.memory_reserved(0)
+        # _mem_a = torch.cuda.memory_allocated(0)
+        # print(f'** mem reserved: {_mem_r}')
+        # print(f'** mem allocated: {_mem_a}')
 
         ex = processed_spider_dataset[ex_id]
         
-        text_in = ex['text_in']
-        struct_in = ex['struct_in']
+        analysis_samples = create_analysis_sample_dicts(
+            mt_uskg, ex, args.subject_type,
+            remove_struct_duplicate_cols=True)
 
-        enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-        enc_tokenized = mt_uskg.tokenizer(enc_sentence)
-        input_len = len(enc_tokenized["input_ids"])
-        print(f'** enc_sentence_len: {input_len}')
-        if input_len > 500:
-            ex_out_dict = {
-                'ex_id': ex_id,
-                'trace_results': [],
-                'err_msg': f'Input too long: {input_len} > 500',
-            }
-        else:
-            parsed_struct_in = parse_struct_in(struct_in)
-            col2table = defaultdict(list)
-            # table2full_range = dict()
-            db_id_t, tables = parsed_struct_in
-            for table_name_t, cols in tables:
-                for col_name_t, vals in cols:
-                    _, table_name, _ = table_name_t
-                    _, col_name, _ = col_name_t
-                    col2table[col_name].append(table_name)
+        ex_out_dict = {'ex_id': ex_id}
+        
+        input_too_long = False
+        if len(analysis_samples) > 0:
+            # enc_sentence = analysis_samples[0]['enc_sentence']
+            # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
+            enc_tokenized = analysis_samples[0]['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+
+            if input_len > 500:
+                ex_out_dict['trace_results'] = []
+                ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+                input_too_long = True
+
+        ex_results = []
+        for a_ex in analysis_samples:
+            if input_too_long:
+                continue
+
+            a_ex = add_clean_prediction(mt_uskg, a_ex)
             
-            text_range, struct_range = find_text_struct_in_range(mt_uskg.tokenizer, enc_tokenized['input_ids'])
-            token_ranges_dict = find_struct_name_ranges(mt_uskg.tokenizer, ex)
-            # token_ranges_dict = find_struct_name_ranges(mt_uskg.tokenizer, enc_tokenized['input_ids'], struct_in)
-            col_name_ranges = token_ranges_dict['col_name_ranges']
-            tab_name_ranges = token_ranges_dict['table_name_ranges']
+            result = trace_exp2_text_struct(mt_uskg, a_ex)
 
-            sql_tokens = separate_punct(ex['seq_out']).split(' ')
-            sql_cols = set()
-            for t in sql_tokens:
-                if t in col_name_ranges:
-                    sql_cols.add(t)
-            # Update: remove columns appearing multiple times in struct, which may differ from trend of others 
-            for t in list(sql_cols):
-                if len(col2table[t]) == 0:
-                    raise ValueError(ex_id, struct_in, t)
-                elif len(col2table[t]) > 1:
-                    sql_cols.remove(t)
-            
-            ex_results = []
-            
-            for col in sql_cols:
-                total_samples += 1
-                
-                dec_prompt = make_dec_prompt(ex['seq_out'], col)
-                expect = col
-                tab, = col2table[col]    # assert singleton by ","
-                col_range, = col_name_ranges[col]
-                tab_range, = tab_name_ranges[tab]
+            ex_results.append(result)
 
-                struct_no_col_toks = [tnum for tnum in range(*struct_range) if tnum not in range(*col_range)]
-                
-                result = {
-                    "text_in": text_in,
-                    "struct_in": struct_in,
-                    "seq_out": ex['seq_out'],
-                    "dec_prompt": dec_prompt,
-                    "expect": col,
-                    "table": tab,
-                    "expect_input_range": col_range,
-                    "mutual_scores": dict()
-                }
+            total_samples += 1
+            n_good_samples += result['is_good_sample']
+            n_too_hard += (not result['correct_prediction'])
+            n_too_easy += (result.get('base_score', 0.0) - result.get('low_score', 0.0) < 0.5)
 
-
-                inp = make_inputs_t5(
-                    mt_uskg.tokenizer,
-                    [enc_sentence] * 11,
-                    [dec_prompt] * 11,
-                    answer=expect)
-
-                encoder_text_last_layer_states = [
-                    (tnum, layername_uskg(mt_uskg.model, 'encoder', mt_uskg.num_enc_layers - 1))
-                    for tnum in range(*text_range)
-                ]
-                encoder_struct_last_layer_states = [
-                    (tnum, layername_uskg(mt_uskg.model, 'encoder', mt_uskg.num_enc_layers - 1))
-                    for tnum in range(*struct_range)
-                ]
-                encoder_col_last_layer_states = [
-                    (tnum, layername_uskg(mt_uskg.model, 'encoder', mt_uskg.num_enc_layers - 1))
-                    for tnum in range(*col_range)
-                ]
-                encoder_struct_no_col_last_layer_states = [
-                    (tnum, layername_uskg(mt_uskg.model, 'encoder', mt_uskg.num_enc_layers - 1))
-                    for tnum in struct_no_col_toks
-                ]
-
-                answer_len = len(mt_uskg.tokenizer.tokenize(expect))
-                answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt_uskg.model, inp, pred_len=answer_len)]
-                base_score = min(base_score).item()
-                answer = decode_sentences(mt_uskg.tokenizer, answers_t)
-                
-                result['answer'] = answer
-                result['answers_t'] = answers_t.detach().cpu().numpy().tolist()
-                is_correct_pred = (answer.strip() == expect)
-                result['correct_prediction'] = is_correct_pred
-                
-                if not is_correct_pred:
-                    # scores don't make sense when clean pred is wrong 
-                    result['is_good_sample'] = False
-                    ex_results.append(result)
-                    continue
-                
-                """ Starting Exp2.1.1: finer grained text struct mutual """
-                result['mutual_scores']['clean_t-clean_s'] = base_score
-                
-                # equivalent to restore_text
-                result['mutual_scores']['clean_t-dc_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_text_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=text_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                result['mutual_scores']['clean_t-dirty_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_text_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=struct_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                result['mutual_scores']['dc_t-clean_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_struct_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=struct_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                ## For exp-2.1: mutual corruption
-                # First pass: corrupt text (no restore)
-                # Second pass: corrupt struct, no restore, reset struct output to first pass
-                result['mutual_scores']['dc_t-dc_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=[],
-                    states_to_unpatch=encoder_struct_last_layer_states,
-                    answers_t=answers_t,
-                    tokens_to_mix_1st_pass=text_range,
-                    tokens_to_mix=struct_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                result['mutual_scores']['dc_t-dirty_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=[],
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=struct_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                # equivalent to restore_struct
-                result['mutual_scores']['dirty_t-clean_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_struct_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=text_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                # equivalent to low_score (for text corruption)
-                result['mutual_scores']['dirty_t-dc_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=[],
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=text_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                result['mutual_scores']['dirty_t-dirty_s'] = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=[],
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=list(range(*text_range)) + list(range(*struct_range)),
-                    tokens_to_mix_individual_indices=True,
-                    replace=True,
-                ).item()
-                
+            if result['correct_prediction']:
                 for k in mutual_scores_dict:
                     mutual_scores_dict[k].append(result['mutual_scores'][k])
-                
-                """ Starting Exp2: dirty text recovery """
-                result['base_score'] = result['mutual_scores']['clean_t-clean_s']
-                low_score = result['low_score'] = result['mutual_scores']['dirty_t-dc_s']
-                # if base_score < 0.5:
-                if answer.strip() != col:
-                    n_too_hard += 1
-                    result['is_good_sample'] = False
-                    ex_results.append(result)
-                    continue
-                
-                ## Corrupting text: expect wrong pred 
-                if base_score - low_score < 0.5:
-                    n_too_easy += 1
-                    result['is_good_sample'] = False
-                    ex_results.append(result)
-                    continue
-                
-                n_good_samples += 1
-                result['is_good_sample'] = True
-                
-                ## Restoring text encoding for decoder, but struct encoding are with dirty text encoding 
-                # r_text_score = trace_with_repatch_uskg(
-                #     model=mt_uskg.model,
-                #     inp=inp,
-                #     states_to_patch=encoder_text_last_layer_states,
-                #     states_to_unpatch=[],
-                #     answers_t=answers_t,
-                #     tokens_to_mix=text_range,
-                #     tokens_to_mix_individual_indices=False,
-                #     replace=True,
-                # ).item()
-                # assert np.allclose(r_text_score, result['mutual_scores']['clean_t-dc_s']), \
-                #     (r_text_score, result['mutual_scores']['clean_t-dc_s'])
-                r_text_score = result['mutual_scores']['clean_t-dc_s']
-                
-                ## Restoring clean struct encoding but dirty text encoding for decoder
-                # r_struct_score = trace_with_repatch_uskg(
-                #     model=mt_uskg.model,
-                #     inp=inp,
-                #     states_to_patch=encoder_struct_last_layer_states,
-                #     states_to_unpatch=[],
-                #     answers_t=answers_t,
-                #     tokens_to_mix=text_range,
-                #     tokens_to_mix_individual_indices=False,
-                #     replace=True,
-                # ).item()
-                # assert np.allclose(r_struct_score, result['mutual_scores']['dirty_t-clean_s']), \
-                #     (r_struct_score, result['mutual_scores']['dirty_t-clean_s'])
-                r_struct_score = result['mutual_scores']['dirty_t-clean_s']
-                
-                ## Restoring clean col_name encoding but dirty text encoding for decoder (stricter than above)
-                r_col_score = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_col_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=text_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
 
-                ## Restoring struct except column of interest. Check contextualization of this column into other nodes
-                r_struct_no_col_score = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_struct_no_col_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=text_range,
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-
-                ## Restoring clean col_name encoding; corrupt all tokens. Check if only this column is enough 
-                r_col_corrupt_all_score = trace_with_repatch_uskg(
-                    model=mt_uskg.model,
-                    inp=inp,
-                    states_to_patch=encoder_col_last_layer_states,
-                    states_to_unpatch=[],
-                    answers_t=answers_t,
-                    tokens_to_mix=(0, struct_range[1]),
-                    tokens_to_mix_individual_indices=False,
-                    replace=True,
-                ).item()
-                
-                result['r_text_score'] = r_text_score
-                result['r_struct_score'] = r_struct_score
-                result['r_col_score'] = r_col_score
-                result['r_struct_no_col_score'] = r_struct_no_col_score
-                result['r_col_corrupt_all_score'] = r_col_corrupt_all_score
-                ex_results.append(result)
-                
-                base_scores.append(base_score)
-                low_scores.append(low_score)
-                restore_scores_dict['text'].append(r_text_score)
-                restore_scores_dict['struct'].append(r_struct_score)
-                restore_scores_dict['col'].append(r_col_score)
-                restore_scores_dict['struct_no_col'].append(r_struct_no_col_score)
-                restore_scores_dict['col_corrupt_all'].append(r_col_corrupt_all_score)
-                
-            ex_out_dict = {
-                'ex_id': ex_id,
-                'trace_results': ex_results,
-            }
+            if result['is_good_sample']:
+                base_scores.append(result['base_score'])
+                low_scores.append(result['low_score'])
+                restore_scores_dict['text'].append(result['r_text_score'])
+                restore_scores_dict['struct'].append(result['r_struct_score'])
+                restore_scores_dict['node'].append(result['r_node_score'])
+                restore_scores_dict['struct_no_node'].append(result['r_struct_no_node_score'])
+                restore_scores_dict['node_corrupt_all'].append(result['r_node_corrupt_all_score'])
+            
+        ex_out_dict = {
+            'ex_id': ex_id,
+            'trace_results': ex_results,
+        }
         f.write(json.dumps(ex_out_dict, indent=None) + '\n')
     f.close()
 
@@ -1978,9 +1981,9 @@ def main_sdra_2_text_struct_interaction(args):
         ('base_scores', base_scores),
         ('restore_text_scores', restore_scores_dict['text']),
         ('restore_struct_scores', restore_scores_dict['struct']),
-        ('restore_col_scores', restore_scores_dict['col']),
-        ('restore_struct_no_col_scores', restore_scores_dict['struct_no_col']),
-        ('restore_col_corrupt_all_scores', restore_scores_dict['col_corrupt_all']),
+        ('restore_node_scores', restore_scores_dict['node']),
+        ('restore_struct_no_node_scores', restore_scores_dict['struct_no_node']),
+        ('restore_node_corrupt_all_scores', restore_scores_dict['node_corrupt_all']),
     ]:
         avg_gain = numpy.mean([h - l for h, l in zip(high_scores, low_scores)])
         perc_recover = numpy.mean([h - l > 0.5 for h, l in zip(high_scores, low_scores)])
@@ -2019,20 +2022,13 @@ def main_sdra_2_2_dirty_text_struct_restore(args):
 
     mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
 
-    raw_spider_dataset = load_raw_dataset(
-        data_filepath = spider_dataset_path,
-        db_path=spider_db_dir,
-    )
-    processed_spider_dataset = s2s_spider.DevDataset(
-        args=mt_uskg.task_args,
-        raw_datasets=raw_spider_dataset,
-        cache_root=data_cache_dir
-    )
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
     n_ex = len(processed_spider_dataset)
 
     start_id = 0
+    end_id = n_ex
     with open(result_save_path, 'w') as f:
-        for i in tqdm(range(start_id, n_ex), desc=f"MAIN: {exp_name}", ascii=True):
+        for i in tqdm(range(start_id, end_id), desc=f"MAIN: {exp_name}", ascii=True):
             ex = processed_spider_dataset[i]
             results = trace_section_corrupt_restore(
                 mt=mt_uskg,
@@ -2066,15 +2062,7 @@ def main_sdra_3_0_node_corrupt_effect(args):
 
     mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
 
-    raw_spider_dataset = load_raw_dataset(
-        data_filepath = spider_dataset_path,
-        db_path=spider_db_dir,
-    )
-    processed_spider_dataset = s2s_spider.DevDataset(
-        args=mt_uskg.task_args,
-        raw_datasets=raw_spider_dataset,
-        cache_root=data_cache_dir
-    )
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
     n_ex = len(processed_spider_dataset)
 
     # Task-specific args
@@ -2082,8 +2070,9 @@ def main_sdra_3_0_node_corrupt_effect(args):
     skips = ('token',)
 
     start_id = 0
+    end_id = n_ex
     with open(result_save_path, 'w') as f:
-        for ex_id in enumerate(tqdm(range(start_id, n_ex), desc=f"MAIN: {exp_name}", ascii=True)):
+        for ex_id in enumerate(tqdm(range(start_id, end_id), desc=f"MAIN: {exp_name}", ascii=True)):
             ex = processed_spider_dataset[ex_id]
 
             text_in = ex['text_in']
@@ -2167,14 +2156,17 @@ def main_sdra_3_0_node_corrupt_effect(args):
 
 def main():
     args = Namespace()
-    args.ds = 'train'                   # train, dev
-    args.subject_type = 'column'         # table, column, value
+    args.ds = 'dev'                     # train, dev
+    args.subject_type = 'table'         # table, column, value
     args.part = 'encoder'               # encoder, decoder, both
     args.spider_dataset_path = f'/home/yshao/Projects/SDR-analysis/data/spider/{args.ds}+ratsql_graph.json'
     args.spider_db_dir = '/home/yshao/Projects/language/language/xsp/data/spider/database'
     args.data_cache_dir = '/home/yshao/Projects/rome/cache'
+    args.spider_tables_path = '/home/yshao/Projects/language/language/xsp/data/spider/tables.json'
 
     args.result_dir = '/home/yshao/Projects/rome/results'
+
+    evaluate_hardness.evaluator = load_evaluator(args)
 
     main_sdra_2_text_struct_interaction(args)
 

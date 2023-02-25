@@ -47,6 +47,7 @@ from uskg.utils.configue import Configure
 from uskg.utils.training_arguments import WrappedSeq2SeqTrainingArguments
 from uskg.seq2seq_construction import spider as s2s_spider
 from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
+from uskg.third_party.spider import evaluation as sp_eval
 
 
 USKG_SPLITTER = '; structed knowledge: '
@@ -229,6 +230,23 @@ def load_raw_dataset(data_filepath, db_path, schema_cache=None):
 load_raw_dataset.SCHEMA_CACHE = dict()
 
 
+def load_spider_dataset(args, mt):
+    raw_spider_dataset = load_raw_dataset(
+        data_filepath = args.spider_dataset_path,
+        db_path=args.spider_db_dir,
+    )
+    if args.ds == 'train':
+        dataset_cls = s2s_spider.TrainDataset
+    else:
+        dataset_cls = s2s_spider.DevDataset
+    processed_spider_dataset = dataset_cls(
+        args=mt.task_args,
+        raw_datasets=raw_spider_dataset,
+        cache_root=args.data_cache_dir
+    )
+    return processed_spider_dataset
+
+
 def run_model_forward_uskg(
     model,
     input_ids,
@@ -257,6 +275,138 @@ def run_model_forward_uskg(
     )
 
     return model_out
+
+
+class ModelAndTokenizer_USKG:
+    """
+    An object to hold on to (or automatically download and hold)
+    a USKG model and tokenizer.  Counts the number of layers.
+    """
+
+    def __init__(
+        self,
+        model_name=None,
+        # model=None,
+        # tokenizer=None,
+        training_args=None,
+        model_args=None,
+        task_args=None,
+        low_cpu_mem_usage=False,
+        torch_dtype=None,
+        device="cuda",
+    ):
+        # if tokenizer is None:
+        #     assert model_name is not None
+        #     tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # if model is None:
+        #     assert model_name is not None
+        #     model = AutoModelForSeq2SeqLM.from_pretrained(
+        #         model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+        #     )
+        #     nethook.set_requires_grad(False, model)
+        #     model.eval().cuda()
+
+        # if (model is None) or (tokenizer is None):
+        assert model_name is not None
+        model, tokenizer_uskg, tokenizer_fast, training_args, model_args, task_args = load_model_uskg(model_name, untie_embeddings=True)
+        model = model.eval().to(device=device)
+
+        self.tokenizer = tokenizer_fast
+        self.tokenizer_uskg = tokenizer_uskg
+        self.model = model
+        self.training_args = training_args
+        self.model_args = model_args
+        self.task_args = task_args
+        # Layer names in model:
+        # encoder.embed_tokens
+        # encoder.block.2
+        # encoder.block.2.layer.0.SelfAttention
+        # encoder.block.2.layer.1.DenseReluDense
+        # decoder.embed_tokens
+        # decoder.block.2
+        # decoder.block.2.layer.0.SelfAttention
+        # decoder.block.2.layer.1.EncDecAttention
+        # decoder.block.2.layer.2.DenseReluDense
+        self.enc_layer_names = [
+            n
+            for n, m in model.named_modules()
+            if (re.match(r"^pretrain_model\.encoder\.block\.\d+$", n))
+        ]
+        self.dec_layer_names = [
+            n
+            for n, m in model.named_modules()
+            if (re.match(r"^pretrain_model\.decoder\.block\.\d+$", n))
+        ]
+        self.layer_names = self.enc_layer_names + self.dec_layer_names
+
+        self.num_enc_layers = len(self.enc_layer_names)
+        self.num_dec_layers = len(self.dec_layer_names)
+        self.num_layers = len(self.layer_names)
+        
+
+    def __repr__(self):
+        return (
+            f"ModelAndTokenizer_USKG(model: {type(self.model).__name__} "
+            f"[{self.num_layers} layers], "
+            f"tokenizer: {type(self.tokenizer).__name__})"
+        )
+
+
+def layername_uskg(model, part, num, kind=None):
+    """
+    part: encoder / decoder
+    num: layer number
+    kind: embed / self_attn / cross_attn / mlp / None
+    """
+    # if hasattr(model, "transformer"):
+    #     if kind == "embed":
+    #         return "transformer.wte"
+    #     return f'transformer.h.{num}{"" if kind is None else "." + kind}'
+    # if hasattr(model, "gpt_neox"):
+    #     if kind == "embed":
+    #         return "gpt_neox.embed_in"
+    #     if kind == "attn":
+    #         kind = "attention"
+    #     return f'gpt_neox.layers.{num}{"" if kind is None else "." + kind}'
+    assert hasattr(model.pretrain_model, part), f"{part} not in the model.pretrain_model of type {type(model.pretrain_model)}"
+
+    # Layer names
+    # decoder.block.2
+    # decoder.block.2.layer.0.SelfAttention
+    # decoder.block.2.layer.1.EncDecAttention
+    # decoder.block.2.layer.2.DenseReluDense
+
+    if kind == "embed":
+        return f"pretrain_model.{part}.embed_tokens"
+
+    _kind = None
+    if kind == "self_attn":
+        _kind = "layer.0.SelfAttention"
+    elif kind == "cross_attn":
+        assert part == "decoder", f"model {part} doesn't have {kind}"
+        _kind = "layer.1.EncDecAttention"
+    elif kind == "mlp":
+        if part == "encoder":
+            _kind = "layer.1.DenseReluDense"
+        elif part == "decoder":
+            _kind = "layer.2.DenseReluDense"
+    
+    return f"pretrain_model.{part}.block.{num}{'' if _kind is None else '.' + _kind}"
+
+
+def load_evaluator(args):
+    table_path = args.spider_tables_path
+    db_dir = args.spider_db_dir
+
+    kmaps = sp_eval.build_foreign_key_map_from_json(table_path)
+    evaluator = sp_eval.Evaluator(db_dir=db_dir, kmaps=kmaps, etype='all')
+    
+    return evaluator
+
+# def guess_subject(prompt):
+#     return re.search(r"(?!Wh(o|at|ere|en|ich|y) )([A-Z]\S*)(\s[A-Z][a-z']*)*", prompt)[
+#         0
+#     ].strip()
 
 
 def separate_punct(s, exclude='_'):
@@ -459,11 +609,17 @@ def find_struct_name_ranges(tokenizer, ex):
 
 def make_dec_prompt(dec_target, subject):
     dec_target = ' ' + dec_target + ' '  # to avoid the matching problems at the ends 
-    m = re.search(fr'\W({subject})\W', dec_target)
-    assert m is not None
-    s, e = m.span(1)
-    prompt = dec_target[:s].strip()
-    return prompt
+    # m = re.search(fr'\W({subject})\W', dec_target)
+    m_iter = re.finditer(fr'\W({subject})\W', dec_target)
+    prompts = []
+    for m in m_iter:
+        s, e = m.span(1)
+        prompt = dec_target[:s].strip()
+        prompts.append(prompt)
+
+    assert prompts, (dec_target, subject)
+    
+    return prompts
 
 def ensure_list(x):
     """ If x is singleton (int, float, etc.), make it a singleton-list """
@@ -474,7 +630,46 @@ def ensure_list(x):
         x = [x]
     return x
 
-def check_text_match(spider_ex, col, tab=None):
+def evaluate_hardness(sql_str, db_id, args=None, evaluator=None):
+    if evaluator is None:
+        try:
+            # use saved evaluator
+            evaluator = evaluate_hardness.evaluator
+        except AttributeError:
+            # create and save a new evaluator
+            assert args is not None
+            evaluate_hardness.evaluator = load_evaluator(args)
+    else:
+        # evaluator is not None; save the passed-in evaluator
+        evaluate_hardness.evaluator = evaluator
+
+    schema = evaluator.schemas[db_id]
+    _sql = sp_eval.get_sql(schema, sql_str)
+    hardness = evaluator.eval_hardness(_sql)
+    return hardness
+
+# evaluate_hardness.evaluator = None
+
+
+# def detect_column_role(dec_prompt):
+#     role_keyword_pattern = r'\W(select|where|join|group by|having|order by)\W'
+#     all_kws = re.findall(role_keyword_pattern, ' ' + dec_prompt + ' ')
+#     assert len(all_kws) > 0, dec_prompt
+#     col_role_kw = all_kws[-1]
+#     return col_role_kw
+
+
+def detect_node_role(dec_prompt):
+    """ BBB TODO: test on column / tables """
+    # didn't include "on" and "as" to put all "join" results together 
+    role_keyword_pattern = r'\W(select|from|where|join|group by|having|order by)\W'
+    all_kws = re.findall(role_keyword_pattern, ' ' + dec_prompt + ' ')
+    assert len(all_kws) > 0, dec_prompt
+    role_kw = all_kws[-1]
+    return role_kw    
+
+
+def check_col_text_match(spider_ex, col, tab=None):
     # col = result_d['expect']
     # tab = result_d['table']
     # node_name = f'<C>{tab}::{col}'
@@ -513,6 +708,32 @@ def check_text_match(spider_ex, col, tab=None):
     if REL2ID['cqCEM'] in rel_row:
         return 'exact'
     elif REL2ID['cqCPM'] in rel_row:
+        return 'partial'
+    else:
+        return 'no-match'
+
+
+def check_table_text_match(spider_ex, tab):
+    nodes = spider_ex['rat_sql_graph']['nodes']
+
+    # use struct_in to find table id; use these to index ratsql node
+    # (cannot directly index ratsql nodes because there they do lemmatization)
+    db_id, tables = parse_struct_in(spider_ex['struct_in'])
+    for tid, (tab_name_t, cols) in enumerate(tables):
+        if tab_name_t[1] == tab:
+            node_tid = tid
+            break
+
+    all_tab_nodes = [n for n in nodes if n.startswith('<T>')]
+    tab_node = all_tab_nodes[node_tid]
+    node_idx = nodes.index(tab_node)
+    
+    rel_matrix = json.loads(spider_ex['rat_sql_graph']['relations'])
+    rel_row = rel_matrix[node_idx]
+    
+    if REL2ID['tqTEM'] in rel_row:
+        return 'exact'
+    elif REL2ID['tqTPM'] in rel_row:
         return 'partial'
     else:
         return 'no-match'
