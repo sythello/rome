@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import re
-from collections import defaultdict
+from collections import defaultdict, Counter
 import copy
 
 import numpy
@@ -419,6 +419,7 @@ def token_corruption_influence_uskg(
     Check corrupting each token does how much negative influence on prediction acc 
     Need ex keys:
         enc_sentence, dec_prompt, expect, struct_in
+    For now, ex should be a_ex
     """
 
     enc_sentence = ex['enc_sentence']
@@ -432,33 +433,17 @@ def token_corruption_influence_uskg(
         answer=expect,
         device=device
     )
-    answer_len = 1
-    if expect is not None:
-        answer_len = len(mt.tokenizer.tokenize(expect))
-    with torch.no_grad():
-        answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt.model, inp, pred_len=answer_len)]
-    base_score = base_score.min().item()
-    # [answer] = decode_tokens(mt.tokenizer, [answer_t])
-    answer = decode_sentences(mt.tokenizer, answers_t)
 
-    return_dict = {
-        'enc_sentence': enc_sentence,
-        'dec_prompt': dec_prompt,
-        'expect': expect,
-        'base_score': base_score,
-        'answers_t': answers_t.detach().cpu().numpy().tolist(),
-        'answer': answer,
-    }
+    return_dict = make_basic_result_dict(ex)
 
-    if expect is not None and answer.strip() != expect:
+    if not ex['correct_prediction']:
         return_dict['correct_prediction'] = False
         return_dict['res_list'] = None
         return return_dict
-        # return dict(
-        #     expect=expect,
-        #     clean_pred=answer,
-        #     correct_prediction=False)
+
     return_dict['correct_prediction'] = True
+    base_score = ex['base_score']
+    answers_t = ex['answers_t']
 
     input_tokens = decode_tokens(mt.tokenizer, inp['input_ids'][0])
     res = []
@@ -912,7 +897,7 @@ def trace_struct_restore(
     replace=True,
     window=10,
     kind=None,
-    remove_struct_duplicate_cols=True,
+    remove_struct_duplicate_nodes=True,
 ):
     """
     AAA
@@ -931,7 +916,7 @@ def trace_struct_restore(
     else:
         raise ValueError(part)
 
-    analysis_samples = create_analysis_sample_dicts(mt, ex, subject_type, remove_struct_duplicate_cols)
+    analysis_samples = create_analysis_sample_dicts(mt, ex, subject_type, remove_struct_duplicate_nodes)
 
     all_results = []
     for a_ex in analysis_samples:
@@ -982,10 +967,10 @@ def trace_section_corrupt_restore(
     replace=True,
     window=10,
     kind=None,
-    remove_struct_duplicate_cols=True,     # If True, remove column names appearing multiple times in struct
+    remove_struct_duplicate_nodes=True,     # If True, remove column names appearing multiple times in struct
 ):
     """
-    AAA
+    AAAA
     Exp 2.2
     TODO: support subject_type = table (seems already ok?)
     """
@@ -993,71 +978,36 @@ def trace_section_corrupt_restore(
     if part != 'encoder':
         raise ValueError(part)
 
-    text_in = ex['text_in']
-    struct_in = ex['struct_in']
-
-    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-    enc_tokenized = mt.tokenizer(enc_sentence)
-
-    parsed_struct_in = parse_struct_in(struct_in)
-    col2table = defaultdict(list)
-    db_id_t, tables = parsed_struct_in
-    for table_name_t, cols in tables:
-        for col_name_t, vals in cols:
-            _, table_name, _ = table_name_t
-            _, col_name, _ = col_name_t
-            col2table[col_name].append(table_name)
-
-    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
-    if corrupt_section == 'text':
-        corrupt_tok_indices = list(range(*text_range))
-    elif corrupt_section == 'struct':
-        corrupt_tok_indices = list(range(*struct_range))
-    else:
-        raise ValueError(corrupt_section)
-
-    # token_ranges_dict = find_struct_name_ranges(mt.tokenizer, enc_tokenized['input_ids'], struct_in)
-    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
-
-    if subject_type == 'column':
-        node_name_ranges = token_ranges_dict['col_name_ranges']
-    elif subject_type == 'table':
-        node_name_ranges = token_ranges_dict['table_name_ranges']
-    elif subject_type == 'value':
-        node_name_ranges = token_ranges_dict['val_name_ranges']
-    elif subject_type == 'db_id':
-    #     token_name_ranges = token_ranges_dict['db_id_name_ranges']
-        raise NotImplementedError('db_id is not used in sql')
-    else:
-        raise NotImplementedError(subject_type)
-
-    sql_tokens = separate_punct(ex['seq_out']).split(' ')
-    sql_nodes = set()
-    for t in sql_tokens:
-        if t in node_name_ranges:
-            sql_nodes.add(t)
+    # token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
     
-    if subject_type == 'column':
-        for t in list(sql_nodes):
-            if len(col2table[t]) == 0:
-                raise ValueError(struct_in, t)
-            elif (len(col2table[t]) > 1) and remove_struct_duplicate_cols:
-                sql_nodes.remove(t)
+    analysis_samples = create_analysis_sample_dicts(mt, ex, subject_type, remove_struct_duplicate_nodes)
 
     all_results = []
-    for node in sql_nodes:
-        tok_ranges = node_name_ranges[node]
-        # TODO: handle duplicate cols 
+    for a_ex in analysis_samples:
+        # tok_ranges = node_name_ranges[node]
+        # TODO (later): handle duplicate cols in struct_in
         # full token range as a single item, to restore simultaneously
+
+        # text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
+        text_range = a_ex['text_range']
+        struct_range = a_ex['struct_range']
+        if corrupt_section == 'text':
+            corrupt_tok_indices = list(range(*text_range))
+        elif corrupt_section == 'struct':
+            corrupt_tok_indices = list(range(*struct_range))
+        else:
+            raise ValueError(corrupt_section)
+
+        tok_ranges = a_ex['expect_input_ranges']
+        tok_indices = [i for s, e in tok_ranges for i in range(s, e)]
+        enc_sentence = a_ex['enc_sentence']
+        dec_prompt = a_ex['dec_prompt']
+        node = a_ex['expect']
+
         enc_token_range = [[i for s, e in tok_ranges for i in range(s, e)]]
         dec_token_range = []
 
-        try:
-            dec_prompt = make_dec_prompt(ex['seq_out'], node)
-        except:
-            breakpoint()
-
-        result = calculate_hidden_flow_uskg(
+        trace_result = calculate_hidden_flow_uskg(
             mt,
             enc_sentence=enc_sentence,
             dec_prompt=dec_prompt,
@@ -1074,15 +1024,14 @@ def trace_section_corrupt_restore(
             window=window,
             kind=kind,
         )
-
-        result['expect'] = node      # actually already available in ['answer']
-        result['subject_type'] = subject_type
-        if subject_type == 'column':
-            result['table'] = col2table[node][0]    # col2table[node] is a list
-        elif subject_type == 'table':
-            result['table'] = node
-        result['db_id'] = ex['db_id']
-        result['expect_input_indices'] = enc_token_range
+        
+        result = make_basic_result_dict(a_ex)
+        for k, v in trace_result.items():
+            if k not in result:
+                result[k] = v
+            else:
+                assert result[k] == v, (result[k], v)
+        result['part'] = part
         all_results.append(result)
     return all_results
 
@@ -1092,7 +1041,6 @@ def trace_exp2_text_struct(
     ex,
 ):
     """
-    AAAA
     Exp2
     ex (Dict): analysis_sample (a_ex) with `add_clean_prediction()`
     """
@@ -1115,7 +1063,7 @@ def trace_exp2_text_struct(
     expect_input_ranges = ex['expect_input_ranges']
 
     if len(expect_input_ranges) > 1:
-        assert not ex['remove_struct_duplicate_cols']
+        assert not ex['remove_struct_duplicate_nodes']
         raise NotImplementedError
     
     node_range, = expect_input_ranges
@@ -1637,7 +1585,7 @@ def create_analysis_sample_dicts(
         mt, 
         ex, 
         subject_type,
-        remove_struct_duplicate_cols=True):
+        remove_struct_duplicate_nodes=True):
     """
     BBB
     Create a new sample dict or analysis purpose 
@@ -1659,12 +1607,15 @@ def create_analysis_sample_dicts(
     
     parsed_struct_in = parse_struct_in(struct_in)
     col2table = defaultdict(list)
+    node_name_counter = Counter()
     db_id_t, tables = parsed_struct_in
     for table_name_t, cols in tables:
+        _, table_name, _ = table_name_t
+        node_name_counter[table_name] += 1
         for col_name_t, vals in cols:
-            _, table_name, _ = table_name_t
             _, col_name, _ = col_name_t
             col2table[col_name].append(table_name)
+            node_name_counter[col_name] += 1
 
     token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
     if subject_type == 'column':
@@ -1680,12 +1631,18 @@ def create_analysis_sample_dicts(
         if t in node_name_ranges:
             sql_nodes.add(t)
     
-    if subject_type == 'column':
-        for t in list(sql_nodes):
-            if len(col2table[t]) == 0:
-                raise ValueError(struct_in, t)
-            elif (len(col2table[t]) > 1) and remove_struct_duplicate_cols:
-                sql_nodes.remove(t)
+    # if subject_type == 'column':
+    #     for t in list(sql_nodes):
+    #         if len(col2table[t]) == 0:
+    #             raise ValueError(struct_in, t)
+    #         elif (len(col2table[t]) > 1) and remove_struct_duplicate_nodes:
+    #             sql_nodes.remove(t)
+    for t in list(sql_nodes):
+        _occ = node_name_counter[t]
+        if _occ == 0:
+            raise ValueError(struct_in, t)
+        elif _occ > 1 and remove_struct_duplicate_nodes:
+            sql_nodes.remove(t)
     
     # Add hardness info
     sql_hardness = evaluate_hardness(ex['seq_out'], ex['db_id'])
@@ -1710,7 +1667,7 @@ def create_analysis_sample_dicts(
             _ex['dec_prompt'] = dec_prompt
             _ex['expect'] = expect
             _ex['expect_type'] = subject_type
-            _ex['remove_struct_duplicate_cols'] = remove_struct_duplicate_cols
+            _ex['remove_struct_duplicate_nodes'] = remove_struct_duplicate_nodes
             _ex['parsed_struct_in'] = parsed_struct_in
             _ex['col2table'] = col2table
             _ex['token_ranges_dict'] = token_ranges_dict
@@ -1770,6 +1727,7 @@ def add_clean_prediction(
     answer = decode_sentences(mt.tokenizer, answers_t)
     is_correct_pred = (answer.strip() == expect)
 
+    # a_ex['inp'] = inp     # might take GPU mem...
     a_ex['answer_len'] = answer_len
     a_ex['base_score'] = base_score
     a_ex['answers_t'] = answers_t
@@ -1856,7 +1814,6 @@ def main_sdra_1_struct_node_restore(args):
 
 def main_sdra_2_text_struct_interaction(args):
     """ 
-    AAAA
     Exp2 (text struct interaction): corrupt text (or struct/all), restore the *final* encoding
         of different parts to check recovery effect
     Adapted from notebook.
@@ -1864,7 +1821,7 @@ def main_sdra_2_text_struct_interaction(args):
 
     out_dir = os.path.join(args.result_dir, 'exp2_text_struct_interaction')
     os.makedirs(out_dir, exist_ok=True)
-    exp_name = f'exp=2_{args.ds}_{args.subject_type}-tmp'
+    exp_name = f'exp=2_{args.ds}_{args.subject_type}'
     res_save_path = os.path.join(out_dir, f'{exp_name}.jsonl')
 
     # Load model and dataset 
@@ -1906,7 +1863,7 @@ def main_sdra_2_text_struct_interaction(args):
     f = open(res_save_path, 'w')
     start_id = 0
     end_id = n_ex
-    stride = 33
+    stride = 1
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
         # DEBUG
         # print(f'** DEBUG info:')
@@ -1920,7 +1877,7 @@ def main_sdra_2_text_struct_interaction(args):
         
         analysis_samples = create_analysis_sample_dicts(
             mt_uskg, ex, args.subject_type,
-            remove_struct_duplicate_cols=True)
+            remove_struct_duplicate_nodes=True)
 
         ex_out_dict = {'ex_id': ex_id}
         
@@ -1930,7 +1887,7 @@ def main_sdra_2_text_struct_interaction(args):
             # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
             enc_tokenized = analysis_samples[0]['enc_tokenized']
             input_len = len(enc_tokenized['input_ids'])
-
+            
             if input_len > 500:
                 ex_out_dict['trace_results'] = []
                 ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
@@ -1948,9 +1905,11 @@ def main_sdra_2_text_struct_interaction(args):
             ex_results.append(result)
 
             total_samples += 1
-            n_good_samples += result['is_good_sample']
-            n_too_hard += (not result['correct_prediction'])
-            n_too_easy += (result.get('base_score', 0.0) - result.get('low_score', 0.0) < 0.5)
+            if result['is_good_sample']:
+                n_good_samples += 1
+            else:
+                n_too_hard += (not result['correct_prediction'])
+                n_too_easy += (result.get('base_score', 0.0) - result.get('low_score', 0.0) < 0.5)
 
             if result['correct_prediction']:
                 for k in mutual_scores_dict:
@@ -2008,6 +1967,7 @@ def main_sdra_2_text_struct_interaction(args):
 
 def main_sdra_2_2_dirty_text_struct_restore(args):
     """
+    AAAA
     Exp 2.2: Corrupt the text, restoring the struct node of interest
     Purpose: check the pos of contextualization of text into struct nodes
     """
@@ -2027,8 +1987,9 @@ def main_sdra_2_2_dirty_text_struct_restore(args):
 
     start_id = 0
     end_id = n_ex
+    stride = 1
     with open(result_save_path, 'w') as f:
-        for i in tqdm(range(start_id, end_id), desc=f"MAIN: {exp_name}", ascii=True):
+        for i in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
             ex = processed_spider_dataset[i]
             results = trace_section_corrupt_restore(
                 mt=mt_uskg,
@@ -2066,89 +2027,41 @@ def main_sdra_3_0_node_corrupt_effect(args):
     n_ex = len(processed_spider_dataset)
 
     # Task-specific args
-    remove_struct_duplicate_cols = True
+    remove_struct_duplicate_nodes = True
     skips = ('token',)
 
     start_id = 0
     end_id = n_ex
+    stride = 1
     with open(result_save_path, 'w') as f:
-        for ex_id in enumerate(tqdm(range(start_id, end_id), desc=f"MAIN: {exp_name}", ascii=True)):
+        for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
             ex = processed_spider_dataset[ex_id]
 
-            text_in = ex['text_in']
-            struct_in = ex['struct_in']
+            analysis_samples = create_analysis_sample_dicts(
+                mt_uskg, ex, args.subject_type,
+                remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
 
-            enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-            ex['enc_sentence'] = enc_sentence
-            
-            parsed_struct_in = parse_struct_in(struct_in)
-            col2table = defaultdict(list)
-            db_id_t, tables = parsed_struct_in
-            for table_name_t, cols in tables:
-                for col_name_t, vals in cols:
-                    _, table_name, _ = table_name_t
-                    _, col_name, _ = col_name_t
-                    col2table[col_name].append(table_name)
-
-            token_ranges_dict = find_struct_name_ranges(mt_uskg.tokenizer, ex)
-            if args.subject_type == 'column':
-                node_name_ranges = token_ranges_dict['col_name_ranges']
-            elif args.subject_type == 'table':
-                node_name_ranges = token_ranges_dict['table_name_ranges']
-            
-            sql_tokens = separate_punct(ex['seq_out']).split(' ')
-            sql_nodes = set()
-            for t in sql_tokens:
-                if t in node_name_ranges:
-                    sql_nodes.add(t)
-            
-            if args.subject_type == 'column':
-                for t in list(sql_nodes):
-                    if len(col2table[t]) == 0:
-                        raise ValueError(struct_in, t)
-                    elif (len(col2table[t]) > 1) and remove_struct_duplicate_cols:
-                        sql_nodes.remove(t)
-
-            for node in sql_nodes:
-                # tok_ranges = node_name_ranges[node]
+            for a_ex in analysis_samples:
                 
-                expect = node
-                dec_prompt = make_dec_prompt(ex['seq_out'], expect)
-
-                _ex = dict(ex)
-                _ex['dec_prompt'] = dec_prompt
-                _ex['expect'] = expect
-                
-                # Check base performance: already done in token_corruption_influence_uskg()
-                # inp = make_inputs_t5(
-                #     mt_uskg.tokenizer,
-                #     [enc_sentence],
-                #     [dec_prompt],
-                #     answer=expect,
-                #     device='cuda'
-                # )
-                # answer_len = len(mt_uskg.tokenizer.tokenize(expect))
-                # with torch.no_grad():
-                #     answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt_uskg.model, inp, pred_len=answer_len)]
-                # base_score = base_score.min().item()
-                # answer = decode_sentences(mt_uskg.tokenizer, answers_t)
+                # TODO: check input_len, skip if > 500
+                a_ex = add_clean_prediction(mt_uskg, a_ex)
 
                 result_d = token_corruption_influence_uskg(
                     mt_uskg,
                     # enc_sentence=enc_sentence,
                     # dec_prompt=dec_prompt,
                     # expect=expect,
-                    _ex,
+                    a_ex,
                     replace=True,
                     use_tqdm=False,
                     skips=skips,
                 )
                 
                 result_d['ex_id'] = ex_id
-                if args.subject_type == 'column':
-                    result_d['expect_table'] = col2table[expect][0]
-                elif args.subject_type == 'table':
-                    result_d['expect_table'] = expect
+                # if args.subject_type == 'column':
+                #     result_d['expect_table'] = col2table[expect][0]
+                # elif args.subject_type == 'table':
+                #     result_d['expect_table'] = expect
 
                 # all_results.append(result_d)
                 f.write(json.dumps(result_d, indent=None) + '\n')
@@ -2168,7 +2081,11 @@ def main():
 
     evaluate_hardness.evaluator = load_evaluator(args)
 
-    main_sdra_2_text_struct_interaction(args)
+    main_sdra_3_0_node_corrupt_effect(args)
+
+    args.subject_type = 'column'
+    main_sdra_3_0_node_corrupt_effect(args)
+
 
 
 if __name__ == "__main__":
