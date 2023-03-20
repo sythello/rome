@@ -623,8 +623,9 @@ def make_dec_prompt(dec_target, subject):
 
 def ensure_list(x):
     """ If x is singleton (int, float, etc.), make it a singleton-list """
+    """ TODO: make this safer (e.g. for str, it will pass the test as a list of chars) """
     try:
-        _ = x[0]
+        _ = list(x)
     except:
         # singleton
         x = [x]
