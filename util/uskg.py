@@ -412,7 +412,7 @@ def load_evaluator(args):
 def separate_punct(s, exclude='_'):
     """
     avg(age), min(age)  ==>  avg ( age ) , min ( age )
-    exclude (Iterable): the puncts not to separate (e.g. "." as in "t1.age")
+    exclude (Iterable): the puncts not to separate (e.g. "_" as in "pet_type")
     by default: _ (song_name)
     include: . (t1.age -> t1 . age)   % ('%hey%' -> ' % hey % ')
     """
@@ -661,7 +661,6 @@ def evaluate_hardness(sql_str, db_id, args=None, evaluator=None):
 
 
 def detect_node_role(dec_prompt):
-    """ BBB TODO: test on column / tables """
     # didn't include "on" and "as" to put all "join" results together 
     role_keyword_pattern = r'\W(select|from|where|join|group by|having|order by)\W'
     all_kws = re.findall(role_keyword_pattern, ' ' + dec_prompt + ' ')
@@ -738,4 +737,20 @@ def check_table_text_match(spider_ex, tab):
         return 'partial'
     else:
         return 'no-match'
-    
+
+
+def parse_sql_alias2table(sql_str):
+    """ Assume that alias-table binding only happens in format like '... JOIN table AS t1 ...' """
+    sql_tokens = sql_str.lower().strip().split()
+    alias2table = dict()
+
+    for i, t in enumerate(sql_tokens):
+        if t == 'as':
+            assert 0 < i < len(sql_tokens) - 1, sql_str
+            assert sql_tokens[i-2] in {'from', 'join'}, sql_str
+            table_name = sql_tokens[i-1]
+            alias = sql_tokens[i+1]
+            assert alias.startswith('t'), alias
+            alias2table[alias] = table_name
+
+    return alias2table
