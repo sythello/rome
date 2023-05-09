@@ -33,7 +33,7 @@ from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NA
     separate_punct, make_dec_prompt, parse_struct_in, ensure_list, \
     ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
     evaluate_hardness, detect_node_role, check_col_text_match, check_table_text_match, \
-    parse_sql_alias2table
+    parse_sql_alias2table, nested_list_processing
 
 from transformers import (
     HfArgumentParser,
@@ -187,7 +187,7 @@ def trace_with_patch_uskg_multi_token(
     answers_t = ensure_list(answers_t)
     for i, _t in enumerate(answers_t):
         # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
-        probs = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
+        probs = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=-1).mean(dim=0)[_t]
         # probs = probs.detach().cpu().numpy().round(decimals=4).to_list()
         all_ans_probs.append(probs)
 
@@ -215,12 +215,14 @@ def trace_with_patch_uskg(*args, **kwargs):
         return probs
 
 
-def trace_with_repatch_uskg_multi_token(
+
+
+def run_repatch_uskg_multi_token(
     model,  # The model
     inp,  # A set of inputs
     states_to_patch,    # A list of (token index, layername) triples to restore
     states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-    answers_t,      # Answer probabilities to collect
+    answer_len,      # Answer length to collect
     tokens_to_mix,  # Range of tokens to corrupt (begin, end)
     states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
     tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
@@ -359,25 +361,72 @@ def trace_with_repatch_uskg_multi_token(
                 first_pass_trace = td
                 first_pass_outputs_exp = outputs_exp
 
+    # Here we report softmax probabilities for the answer positions.
+    probs = torch.softmax(outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+    if return_first_pass_preds:
+        probs_pass1 = torch.softmax(first_pass_outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+
+    if return_first_pass_preds:
+        return probs, probs_pass1
+    else:
+        return probs
+
+
+
+def trace_with_repatch_uskg_multi_token(
+    model,  # The model
+    inp,  # A set of inputs
+    states_to_patch,    # A list of (token index, layername) triples to restore
+    states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
+    answers_t,      # Answer probabilities to collect
+    tokens_to_mix,  # Range of tokens to corrupt (begin, end)
+    states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
+    tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
+    tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
+    noise=0.1,  # Level of noise to add
+    uniform_noise=False,
+    replace=False,  # True to replace with instead of add noise
+    # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
+    return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
+):
+    answers_t = ensure_list(answers_t)
+
+    ret = run_repatch_uskg_multi_token(
+        model=model,
+        inp=inp,
+        states_to_patch=states_to_patch,
+        states_to_unpatch=states_to_unpatch,
+        answer_len=len(answers_t),
+        tokens_to_mix=tokens_to_mix,
+        states_to_patch_1st_pass=states_to_patch_1st_pass,
+        tokens_to_mix_1st_pass=tokens_to_mix_1st_pass,
+        tokens_to_mix_individual_indices=tokens_to_mix_individual_indices,
+        noise=noise,
+        uniform_noise=uniform_noise,
+        replace=replace,
+        return_first_pass_preds=return_first_pass_preds,
+    )
+
+    if return_first_pass_preds:
+        assert isinstance(ret, tuple), type(ret)
+        vocab_probs, pass1_vocab_probs = ret
+    else:
+        vocab_probs = ret
+
     # We report softmax probabilities for the answers_t token predictions of interest.
     # probs = torch.softmax(outputs_exp.logits[1:, -1, :], dim=1).mean(dim=0)[answers_t]
     # (YS) allowing multi-token answers_t
     all_ans_probs = []
     pass1_all_ans_probs = []
-    # try:
-    #     _ = answers_t[0]
-    # except:
-    #     # not sequence type, make it a list
-    #     answers_t = [answers_t]
-    answers_t = ensure_list(answers_t)
 
     for i, _t in enumerate(answers_t):
         # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
-        probs = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
+        # vocab_probs: [answer_len, vocab_size]
+        probs = vocab_probs[i, _t]
         all_ans_probs.append(probs)
 
         if return_first_pass_preds:
-            probs_1 = torch.softmax(outputs_exp.logits[1:, -len(answers_t) + i, :], dim=1).mean(dim=0)[_t]
+            probs_1 = pass1_vocab_probs[i, _t]
             pass1_all_ans_probs.append(probs_1)
 
     if return_first_pass_preds:
@@ -1345,25 +1394,13 @@ def trace_exp3_1_struct_context_restore(
     # expect_input_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
     enc_sentence = a_ex['enc_sentence']
     dec_prompt = a_ex['dec_prompt']
-    node = a_ex['expect']
+    # node = a_ex['expect']
 
-    context_range_endpoints = [struct_range[0]]
-    self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
-    for tok_s, tok_e in expect_input_ranges:
-        _l = max([e for e in _all_right_endpoint if e < tok_s])
-        _r = min([s for s in _all_left_endpoint if s > tok_e])
-        context_range_endpoints.extend([_l, _r])
-        self_range_endpoints.extend([_l, _r])
-    context_range_endpoints.append(struct_range[1])
+    self_ranges = a_ex['self_ranges']
+    context_ranges = a_ex['context_ranges']
 
-    self_ranges = [(self_range_endpoints[i], self_range_endpoints[i+1])
-                    for i in range(0, len(self_range_endpoints), 2)]
     self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
-
-    context_ranges = [(context_range_endpoints[i], context_range_endpoints[i+1])
-                        for i in range(0, len(context_range_endpoints), 2)]
     context_tok_indices = corrupt_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
-
     text_tok_indices = list(range(*text_range))
 
 
@@ -1373,9 +1410,10 @@ def trace_exp3_1_struct_context_restore(
 
     result['trace_scores'] = {
         'single_layer_corrupt': dict(),     # this layer self + text patch, next layer context patch
-        'low_layers_restore': dict(),       # this layer self + text patch
+        'low_layers_restore': dict(),       # this layer everything patch, next layer context unpatch
         'high_layers_restore': dict(),      # this & all above layers context patch
-        'single_layer_restore': dict()     # this layer context patch, next layer context unpatch
+        'single_layer_restore': dict(),     # this layer context patch, next layer context unpatch
+        'temp1': dict(),                    # temp1 (single_layer_restore with no unpatch): this layer context patch
     }
 
     inp = make_inputs_t5(
@@ -1457,11 +1495,12 @@ def trace_exp3_1_struct_context_restore(
         result['trace_scores']['single_layer_corrupt'][layer_id] = _score
 
         # low_layers_restore: this layer self + text patch
+        # (new) this layer everything patch, next layer context unpatch
         _score = trace_with_repatch_uskg(
             model=mt.model,
             inp=inp,
-            states_to_patch=_curr_layer_self + _curr_layer_text,
-            states_to_unpatch=[],
+            states_to_patch=_curr_layer_self + _curr_layer_text + _curr_layer_ctx,
+            states_to_unpatch=_next_layer_ctx,
             answers_t=answers_t,
             tokens_to_mix=corrupt_tok_indices,
             tokens_to_mix_individual_indices=True,
@@ -1495,7 +1534,134 @@ def trace_exp3_1_struct_context_restore(
         ).item()
         result['trace_scores']['single_layer_restore'][layer_id] = _score
 
+        # temp1 (single_layer_restore with no unpatch): this layer context patch
+        _score = trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_ctx,
+            states_to_unpatch=[],
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['temp1'][layer_id] = _score
+
     return result
+
+
+
+def trace_exp3_2_struct_context_corrupt_compare(
+    mt,
+    a_ex,                   # analysis_sample (a_ex) with `add_clean_prediction()`
+    samples=10,
+    noise=0.1,
+    part='encoder',         # For now, only 'encoder' supported for section corrupt
+    uniform_noise=False,
+    replace=True,
+    window=10,
+    kind=None,
+):
+    """
+    AAA
+    Exp 3.2
+    """
+
+    text_in = a_ex['text_in']
+    struct_in = a_ex['struct_in']
+    enc_sentence = a_ex['enc_sentence']
+    enc_tokenized = a_ex['enc_tokenized']
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+
+    expect = a_ex['expect']
+    # dec_prompt = make_dec_prompt(a_ex['seq_out'], expect)
+    dec_prompt = a_ex['dec_prompt']
+
+    parsed_struct_in = a_ex['parsed_struct_in']
+    col2table = a_ex['col2table']
+    node_name_ranges = a_ex['node_name_ranges']
+    subject_type = a_ex['expect_type']
+    expect_input_ranges = a_ex['expect_input_ranges']
+
+    # if len(expect_input_ranges) > 1:
+    #     assert not a_ex['remove_struct_duplicate_nodes']
+    #     raise NotImplementedError
+    
+    # node_range, = expect_input_ranges
+
+    if part != 'encoder':
+        raise ValueError(part)
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    token_ranges_dict = a_ex['token_ranges_dict']
+    expect_input_ranges = a_ex['expect_input_ranges']    # list of ranges of node-of-interest (code allows dup)
+    # tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+    # expect_input_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+
+    self_ranges = a_ex['self_ranges']
+    context_ranges = a_ex['context_ranges']
+
+    self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    context_tok_indices = corrupt_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
+    text_tok_indices = list(range(*text_range))
+
+
+    result = make_basic_result_dict(a_ex)
+    result['self_ranges'] = self_ranges
+    result['struct_context_ranges'] = context_ranges
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = result['base_score']
+    clean_correct_prediction = result['correct_prediction']
+
+    inp = make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * (1 + samples),
+        [dec_prompt] * (1 + samples),
+        answer=expect)
+    
+    answer_len = a_ex['answer_len']
+
+    # SCC: struct context corrupted
+    with torch.no_grad():
+        scc_answers_t, scc_base_score = predict_with_repatch(
+            mt.model, 
+            inp, 
+            pred_len=answer_len,
+            states_to_patch=[],
+            states_to_unpatch=[],
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        )
+    scc_score = scc_base_score.min().item()
+    scc_answer = decode_sentences(mt.tokenizer, scc_answers_t)
+    scc_correct_prediction = (scc_answer.strip() == expect)
+
+    result['scc_score'] = scc_score
+    result['scc_answers_t'] = scc_answers_t.detach().cpu().numpy().tolist()
+    result['scc_answer'] = scc_answer
+    result['scc_correct_prediction'] = scc_correct_prediction
+
+    # Compare 
+    result['compare'] = dict()
+    if clean_correct_prediction:
+        if scc_correct_prediction:
+            result['compare']['correctness_compare'] = 'both'
+        else:
+            result['compare']['correctness_compare'] = 'clean+'
+    else:
+        if scc_correct_prediction:
+            result['compare']['correctness_compare'] = 'scc+'
+        else:
+            result['compare']['correctness_compare'] = 'none'
+    
+    return result
+
 
 
 def plot_hidden_flow_uskg(
@@ -1689,6 +1855,7 @@ def predict_from_input_uskg_multi_token(model, inp, pred_len=1):
     # print(out.keys())
     out = out["logits"]
     seq_len = out.size(1)
+    # out: (bsz, seq_len, vocab_size)
     probs = torch.softmax(out[:, seq_len - pred_len : seq_len], dim=-1)
     p, preds = torch.max(probs, dim=-1)
     return preds, p
@@ -1699,7 +1866,6 @@ def predict_with_repatch(
         pred_len,
         states_to_patch,    # A list of (token index, layername) triples to restore
         states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-        # answers_t,      # Answer probabilities to collect
         tokens_to_mix,  # Range of tokens to corrupt (begin, end)
         states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
         tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
@@ -1710,10 +1876,28 @@ def predict_with_repatch(
         # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
         # return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
     ):
-    # TODO
-    trace_with_repatch_uskg_multi_token()
+    vocab_probs = run_repatch_uskg_multi_token(
+        model=model,
+        inp=inp,
+        states_to_patch=states_to_patch,
+        states_to_unpatch=states_to_unpatch,
+        answer_len=pred_len,
+        tokens_to_mix=tokens_to_mix,
+        states_to_patch_1st_pass=states_to_patch_1st_pass,
+        tokens_to_mix_1st_pass=tokens_to_mix_1st_pass,
+        tokens_to_mix_individual_indices=tokens_to_mix_individual_indices,
+        noise=noise,
+        uniform_noise=uniform_noise,
+        replace=replace,
+        return_first_pass_preds=False,
+    )
 
-    pass
+    # trace_with_repatch_uskg_multi_token()
+
+    # vocab_probs: (answer_len, vocab_size)
+    p, preds = torch.max(vocab_probs, dim=-1)
+    return preds, p
+
 
 def collect_embedding_std(mt, subjects):
     alldata = []
@@ -1906,6 +2090,32 @@ def create_analysis_sample_dicts(
 
         expect_input_ranges = node_name_ranges[node]
         dec_prompts = make_dec_prompt(ex['seq_out'], node)
+
+
+        ## Processing for struct context (exp3.1/3.2)
+        _all_node_range_lists = list(token_ranges_dict['col_name_ranges'].values()) + list(token_ranges_dict['table_name_ranges'].values()) + list(token_ranges_dict['db_id_ranges'].values())
+        _all_node_ranges = [rg
+                            for rg_list in _all_node_range_lists
+                            for rg in rg_list]
+        _all_left_endpoint = [s for s, e in _all_node_ranges] + [struct_range[1]]   # add start of non-struct
+        _all_right_endpoint = [e for s, e in _all_node_ranges] + [struct_range[0]]  # add end of non-struct
+
+        context_range_endpoints = [struct_range[0]]
+        self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
+        for tok_s, tok_e in expect_input_ranges:
+            _l = max([e for e in _all_right_endpoint if e <= tok_s])
+            _r = min([s for s in _all_left_endpoint if s >= tok_e])
+            context_range_endpoints.extend([_l, _r])
+            self_range_endpoints.extend([_l, _r])
+        context_range_endpoints.append(struct_range[1])
+
+        self_ranges = [(self_range_endpoints[i], self_range_endpoints[i+1])
+                        for i in range(0, len(self_range_endpoints), 2)]
+
+        context_ranges = [(context_range_endpoints[i], context_range_endpoints[i+1])
+                            for i in range(0, len(context_range_endpoints), 2)]
+        context_ranges = [(s, e) for s, e in context_ranges if e > s]       # rule out empty spans
+
         
         for dec_prompt in dec_prompts:
             # For table_aliases, the "as" prompts are not useful (e.g. ... join table_name as ___) since in Spider the
@@ -1935,6 +2145,8 @@ def create_analysis_sample_dicts(
             _ex['node_name_ranges'] = node_name_ranges
             _ex['expect_input_ranges'] = expect_input_ranges    # [(s, e), ...]
             _ex['alias2table'] = alias2table
+            _ex['self_ranges'] = self_ranges
+            _ex['context_ranges'] = context_ranges
 
             _ex['category'] = {
                 'sql_hardness': sql_hardness,
@@ -2373,6 +2585,7 @@ def main_sdra_3_1_dirty_struct_context_restore(args):
     f = open(result_save_path, 'w')
     start_id = 0
     end_id = n_ex
+    # end_id = 50
     stride = 111
     # with open(result_save_path, 'w') as f:
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
@@ -2444,10 +2657,95 @@ def main_sdra_3_1_dirty_struct_context_restore(args):
     print(f'TODO')
 
 
+
+def main_sdra_3_2_dirty_struct_context_compare(args):
+    """
+    AAA
+    Exp 3.2: Corrupt the full struct context vs. no corruption
+    Purpose: checking the effect of struct context corruption, is it more positive (denoising) or negative (removing info)?
+    """
+
+    spider_dataset_path = args.spider_dataset_path
+    spider_db_dir = args.spider_db_dir
+    data_cache_dir = args.data_cache_dir
+
+    exp_name = f'exp=3.2_{args.ds}_{args.subject_type}'
+    result_save_dir = os.path.join(args.result_dir, 'exp3.2_dirty_struct_context_compare')
+    os.makedirs(result_save_dir, exist_ok=True)
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+
+    mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
+
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
+    n_ex = len(processed_spider_dataset)
+
+    # Stats
+    total_samples = 0
+    
+    ## len = n_good_samples
+    compare_results_counter = Counter()
+
+    f = open(result_save_path, 'w')
+    start_id = 0
+    end_id = n_ex
+    stride = 1
+    # with open(result_save_path, 'w') as f:
+    for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
+        ex = processed_spider_dataset[ex_id]
+
+        analysis_samples = create_analysis_sample_dicts(
+            mt_uskg, ex, args.subject_type,
+            remove_struct_duplicate_nodes=True)
+
+        ex_out_dict = {'ex_id': ex_id}
+        
+        input_too_long = False
+        if len(analysis_samples) > 0:
+            # enc_sentence = analysis_samples[0]['enc_sentence']
+            # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
+            enc_tokenized = analysis_samples[0]['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+            
+            if input_len > 500:
+                ex_out_dict['trace_results'] = []
+                ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+                input_too_long = True
+
+        ex_results = []
+        for a_ex in analysis_samples:
+            if input_too_long:
+                continue
+
+            a_ex = add_clean_prediction(mt_uskg, a_ex)
+            
+            result = trace_exp3_2_struct_context_corrupt_compare(mt_uskg, a_ex)
+
+            ex_results.append(result)
+
+            total_samples += 1
+
+            # global results registration
+            compare_results_counter[result['compare']['correctness_compare']] += 1
+            
+        ex_out_dict = {
+            'ex_id': ex_id,
+            'trace_results': ex_results,
+        }
+        f.write(json.dumps(ex_out_dict, indent=None) + '\n')
+    f.close()
+
+    print(total_samples)
+    print()
+
+    print("-"*10 + "Results for exp3.2" + "-"*10)
+    print(compare_results_counter)
+
+
+
 def main():
     args = Namespace()
     args.ds = 'dev'                     # train, dev
-    args.subject_type = 'table'         # table, table_alias, column, (value)
+    args.subject_type = 'column'         # table, table_alias, column, (value)
     args.part = 'encoder'               # encoder, decoder, both
     args.spider_dataset_path = f'/home/yshao/Projects/SDR-analysis/data/spider/{args.ds}+ratsql_graph.json'
     args.spider_db_dir = '/home/yshao/Projects/language/language/xsp/data/spider/database'
@@ -2458,9 +2756,10 @@ def main():
 
     evaluate_hardness.evaluator = load_evaluator(args)
 
-    main_sdra_3_1_dirty_struct_context_restore(args)
+    main_sdra_3_2_dirty_struct_context_compare(args)
 
-
+    args.subject_type = 'table_alias'
+    main_sdra_3_2_dirty_struct_context_compare(args)
 
 
 if __name__ == "__main__":
