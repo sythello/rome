@@ -768,49 +768,49 @@ def nested_list_processing(nl, func):
     else:
         return func(nl)
 
-def plot_uskg_enc_attention(d, savepdf=None):
-    ## Assume 16 heads, 24 layers (T5 large config)
+# def plot_uskg_enc_attention(d, savepdf=None):
+#     ## Assume 16 heads, 24 layers (T5 large config)
     
-    ## encoder self attention 
-    inspect_layers = [0, 6, 12, 18, 23]
-    att_dict = d['attentions']
+#     ## encoder self attention 
+#     inspect_layers = [0, 6, 12, 18, 23]
+#     att_dict = d['attentions']
     
-    cand_len = len(att_dict['enc_cand_tokens'])
-    head_len = len(att_dict['enc_head_tokens'])
+#     cand_len = len(att_dict['enc_cand_tokens'])
+#     head_len = len(att_dict['enc_head_tokens'])
 
-    fig_w = 22
-    fig_h = (0.11*cand_len + 1) * head_len
-    fig, ax_list = plt.subplots(
-        nrows=head_len,
-        ncols=len(inspect_layers),
-        squeeze=False,
-        figsize=(fig_w, fig_h))
+#     fig_w = 22
+#     fig_h = (0.11*cand_len + 1) * head_len
+#     fig, ax_list = plt.subplots(
+#         nrows=head_len,
+#         ncols=len(inspect_layers),
+#         squeeze=False,
+#         figsize=(fig_w, fig_h))
 
-    att_mat = nested_list_processing(att_dict['enc_attn'], func=float)
-    att_mat = np.array(att_mat)
+#     att_mat = nested_list_processing(att_dict['enc_attn'], func=float)
+#     att_mat = np.array(att_mat)
     
-    for expect_i in range(len(att_dict['enc_head_tokens'])):
-        for l_id, layer in enumerate(inspect_layers):
-            val_mat = att_mat[layer, :, expect_i, :]  # layer, all heads, expect tok i -> all toks 
-            val_mat = val_mat.transpose()    # (cand_toks, n_heads)
-            x_labels = range(val_mat.shape[1])
-            y_labels = att_dict['enc_cand_tokens']
-            title_toks = att_dict['enc_head_tokens'][:expect_i] + [f"*{att_dict['enc_head_tokens'][expect_i]}*"]
-            title = f"L{layer}  Head token: {' '.join(title_toks)}\n"
+#     for expect_i in range(len(att_dict['enc_head_tokens'])):
+#         for l_id, layer in enumerate(inspect_layers):
+#             val_mat = att_mat[layer, :, expect_i, :]  # layer, all heads, expect tok i -> all toks 
+#             val_mat = val_mat.transpose()    # (cand_toks, n_heads)
+#             x_labels = range(val_mat.shape[1])
+#             y_labels = att_dict['enc_cand_tokens']
+#             title_toks = att_dict['enc_head_tokens'][:expect_i] + [f"*{att_dict['enc_head_tokens'][expect_i]}*"]
+#             title = f"L{layer}  Head token: {' '.join(title_toks)}\n"
             
-            ax = ax_list[expect_i, l_id]
-            _draw_single_plot_2(ax,
-                                val_mat=val_mat, 
-                                x_labels=x_labels, 
-                                y_labels=y_labels,
-                                title=title)
+#             ax = ax_list[expect_i, l_id]
+#             _draw_single_plot_2(ax,
+#                                 val_mat=val_mat, 
+#                                 x_labels=x_labels, 
+#                                 y_labels=y_labels,
+#                                 title=title)
             
-    fig.tight_layout()
-    if savepdf:
-        plt.savefig(savepdf, bbox_inches="tight")
-        plt.close()
-    else:
-        plt.show()
+#     fig.tight_layout()
+#     if savepdf:
+#         plt.savefig(savepdf, bbox_inches="tight")
+#         plt.close()
+#     else:
+#         plt.show()
 
 
 

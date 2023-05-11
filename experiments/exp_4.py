@@ -187,14 +187,14 @@ def trace_exp4_inspect_attention(
     return result_dict
 
 
-def plot_uskg_attention():
-    """
-    X: input token
-    Y: layer
-    (code is in notebook)
-    """
+# def plot_uskg_attention():
+#     """
+#     X: input token
+#     Y: layer
+#     (code is in notebook)
+#     """
     
-    pass
+#     pass
 
 
 def main_sdra_4_inspect_attention(args):
@@ -206,7 +206,7 @@ def main_sdra_4_inspect_attention(args):
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=4_{args.ds}_{args.subject_type}_{args.part}'
+    exp_name = f'exp=4_{args.ds}_{args.subject_type}_{args.part}-tmp'
     result_save_dir = os.path.join(args.result_dir, 'exp4_inspect_attention')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')

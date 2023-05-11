@@ -1345,7 +1345,7 @@ def trace_exp3_1_struct_context_restore(
     kind=None,
 ):
     """
-    AAAA
+    AAA
     Exp 3.1
     """
 
@@ -2544,7 +2544,7 @@ def main_sdra_3_0_node_corrupt_effect(args):
 
 def main_sdra_3_1_dirty_struct_context_restore(args):
     """
-    AAAA
+    AAA
     Exp 3.1: Corrupt the full struct context (everything but the node of interest & surronding structure indicators like "|", ":", etc.) ; restore the representation of context (per layer / layer range) and check repair effect
     Purpose: check the process of contextualization of all context tokens into node of interest
     """
