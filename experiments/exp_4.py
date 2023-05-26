@@ -197,6 +197,217 @@ def trace_exp4_inspect_attention(
 #     pass
 
 
+
+def trace_exp4_1_dirty_attention_effect(
+    mt,
+    a_ex,                   # analysis_sample (a_ex) with `add_clean_prediction()`
+    samples=10,
+    noise=0.1,
+    part='encoder',
+    kind='self_attn',
+    uniform_noise=False,
+    replace=True,
+    window=10,
+):
+    """
+    AAAA
+    Exp 4.1
+    """
+
+    text_in = a_ex['text_in']
+    struct_in = a_ex['struct_in']
+    enc_sentence = a_ex['enc_sentence']
+    enc_tokenized = a_ex['enc_tokenized']
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+
+    expect = a_ex['expect']
+    # dec_prompt = make_dec_prompt(a_ex['seq_out'], expect)
+    dec_prompt = a_ex['dec_prompt']
+
+    parsed_struct_in = a_ex['parsed_struct_in']
+    col2table = a_ex['col2table']
+    node_name_ranges = a_ex['node_name_ranges']
+    subject_type = a_ex['expect_type']
+    expect_input_ranges = a_ex['expect_input_ranges']
+
+    # if len(expect_input_ranges) > 1:
+    #     assert not a_ex['remove_struct_duplicate_nodes']
+    #     raise NotImplementedError
+    
+    # node_range, = expect_input_ranges
+
+    if part != 'encoder':
+        raise ValueError(part)
+    
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+
+    # For full context tokens, use [0, L] and [R, -1]
+    # L: node left max end index ; R: node right min start index
+
+    token_ranges_dict = a_ex['token_ranges_dict']
+
+    expect_input_ranges = a_ex['expect_input_ranges']    # list of ranges of node-of-interest (code allows dup)
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+
+    self_ranges = a_ex['self_ranges']
+    context_ranges = a_ex['context_ranges']
+
+    self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    context_tok_indices = corrupt_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
+    text_tok_indices = list(range(*text_range))
+
+
+    result = ctu.make_basic_result_dict(a_ex)
+    result['self_ranges'] = self_ranges
+    result['struct_context_ranges'] = context_ranges
+
+    result['trace_scores'] = {
+        'single_layer_corrupt': dict(),     # this layer self + text patch, next layer context patch
+        'low_layers_restore': dict(),       # this layer everything patch, next layer context unpatch
+        'high_layers_restore': dict(),      # this & all above layers context patch
+        'single_layer_restore': dict(),     # this layer context patch, next layer context unpatch
+        'temp1': dict(),                    # temp1 (single_layer_restore with no unpatch): this layer context patch
+    }
+
+    inp = ctu.make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * (1 + samples),
+        [dec_prompt] * (1 + samples),
+        answer=expect)
+
+    # encoder_struct_no_node_last_layer_states = [
+    #     (tnum, layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1))
+    #     for tnum in struct_no_node_toks
+    # ]
+
+    # answer_len = len(mt.tokenizer.tokenize(expect))
+    # answers_t, base_score = [d[0] for d in predict_from_input_uskg_multi_token(mt.model, inp, pred_len=answer_len)]
+    # base_score = min(base_score).item()
+    # answer = decode_sentences(mt.tokenizer, answers_t)
+    
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = a_ex['base_score']
+    is_correct_pred = result['correct_prediction']
+    
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    base_score = result['base_score']
+    low_score = result['low_score'] = ctu.trace_with_repatch_uskg(
+        model=mt.model,
+        inp=inp,
+        states_to_patch=[],
+        states_to_unpatch=[],
+        answers_t=answers_t,
+        tokens_to_mix=corrupt_tok_indices,
+        tokens_to_mix_individual_indices=True,
+        replace=True,
+    ).item()
+
+    # if base_score < 0.5:
+    if answer.strip() != expect:
+        assert False, "Incorrect prediction should already been skipped!"
+    
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+    
+    result['is_good_sample'] = True
+    
+
+    """ Starting Exp3.1 """
+    for layer_id in range(mt.num_enc_layers):
+        # self_tok_indices, corrupt_tok_indices, layer_id
+        _curr_layer_self = [(tnum, ctu.layername_uskg(mt.model, 'encoder', layer_id))
+                            for tnum in self_tok_indices]
+        _curr_layer_text = [(tnum, ctu.layername_uskg(mt.model, 'encoder', layer_id))
+                            for tnum in text_tok_indices]
+        _curr_layer_ctx = [(tnum, ctu.layername_uskg(mt.model, 'encoder', layer_id))
+                            for tnum in context_tok_indices]
+        _next_layer_ctx = [(tnum, ctu.layername_uskg(mt.model, 'encoder', layer_id + 1))
+                            for tnum in context_tok_indices] if layer_id < mt.num_enc_layers - 1 else []
+        _above_layers_ctx = [(tnum, ctu.layername_uskg(mt.model, 'encoder', l))
+                             for tnum in context_tok_indices
+                             for l in range(layer_id + 1, mt.num_enc_layers)]
+
+        # single_layer_corrupt: this layer self + text patch, next layer context patch
+        _score = ctu.trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_self + _curr_layer_text + _next_layer_ctx,
+            states_to_unpatch=[],
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['single_layer_corrupt'][layer_id] = _score
+
+        # low_layers_restore: this layer self + text patch
+        # (new) this layer everything patch, next layer context unpatch
+        _score = ctu.trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_self + _curr_layer_text + _curr_layer_ctx,
+            states_to_unpatch=_next_layer_ctx,
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['low_layers_restore'][layer_id] = _score
+
+        # high_layers_restore: this & all above layers context patch
+        _score = ctu.trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_ctx + _above_layers_ctx,
+            states_to_unpatch=[],
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['high_layers_restore'][layer_id] = _score
+
+        # single_layer_restore: this layer context patch, next layer context unpatch
+        _score = ctu.trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_ctx,
+            states_to_unpatch=_next_layer_ctx,
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['single_layer_restore'][layer_id] = _score
+
+        # temp1 (single_layer_restore with no unpatch): this layer context patch
+        _score = ctu.trace_with_repatch_uskg(
+            model=mt.model,
+            inp=inp,
+            states_to_patch=_curr_layer_ctx,
+            states_to_unpatch=[],
+            answers_t=answers_t,
+            tokens_to_mix=corrupt_tok_indices,
+            tokens_to_mix_individual_indices=True,
+            replace=True,
+        ).item()
+        result['trace_scores']['temp1'][layer_id] = _score
+
+    return result
+
+
+
+
 def main_sdra_4_inspect_attention(args):
     """
     Exp 4: Check the attention weights

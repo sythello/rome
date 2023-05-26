@@ -33,7 +33,7 @@ from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NA
     separate_punct, make_dec_prompt, parse_struct_in, ensure_list, \
     ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
     evaluate_hardness, detect_node_role, check_col_text_match, check_table_text_match, \
-    parse_sql_alias2table, nested_list_processing
+    parse_sql_alias2table, nested_list_processing, nested_json_processing
 
 from transformers import (
     HfArgumentParser,
@@ -220,12 +220,16 @@ def trace_with_patch_uskg(*args, **kwargs):
 def run_repatch_uskg_multi_token(
     model,  # The model
     inp,  # A set of inputs
+    answer_len,         # Answer length to collect
     states_to_patch,    # A list of (token index, layername) triples to restore
     states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-    answer_len,      # Answer length to collect
-    tokens_to_mix,  # Range of tokens to corrupt (begin, end)
-    states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
+    states_to_corrupt=None,     # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix`
+    tokens_to_mix=None,         # Range of tokens to corrupt (begin, end)
+    # ------ 1st pass related args ------
+    states_to_patch_1st_pass=None,      # states to restore for the 1st pass (default: empty) (Previously this is default to `list()` instead of None; not sure why is that)
+    states_to_corrupt_1st_pass=None,    # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix_1st_pass`
     tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
+    # ------ other args ------
     tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
     noise=0.1,  # Level of noise to add
     uniform_noise=False,
@@ -245,8 +249,9 @@ def run_repatch_uskg_multi_token(
     for t, l in states_to_unpatch:
         unpatch_spec[l].append(t)
     patch_spec_1st_pass = defaultdict(list)
-    for t, l in states_to_patch_1st_pass:
-        patch_spec_1st_pass[l].append(t)
+    if states_to_patch_1st_pass:
+        for t, l in states_to_patch_1st_pass:
+            patch_spec_1st_pass[l].append(t)
 
     embed_layername = layername_uskg(model, "encoder", 0, "embed")
 
@@ -259,6 +264,7 @@ def run_repatch_uskg_multi_token(
     else:
         noise_fn = noise
 
+    # Decide the tokens to mix
     if tokens_to_mix is None:
         tokens_to_mix_indices = None
     elif tokens_to_mix_individual_indices:
@@ -273,32 +279,62 @@ def run_repatch_uskg_multi_token(
     else:
         tokens_to_mix_indices_1st_pass = list(range(*tokens_to_mix_1st_pass))
 
+    # Decide the corruption spec
+    assert (states_to_corrupt is None) or (tokens_to_mix is None), \
+        "Can't pass both `states_to_corrupt` and `tokens_to_mix`"
+    corrupt_spec = defaultdict(list)
+    if states_to_corrupt is not None:
+        for t, l in states_to_corrupt:
+            corrupt_spec[l].append(t)
+    elif tokens_to_mix is not None:
+        corrupt_spec[embed_layername] = tokens_to_mix_indices
+
+    assert (states_to_corrupt_1st_pass is None) or (tokens_to_mix_1st_pass is None), \
+        "Can't pass both `states_to_corrupt_1st_pass` and `tokens_to_mix_1st_pass`"
+    corrupt_spec_1st_pass = defaultdict(list)
+    if states_to_corrupt_1st_pass is not None:
+        for t, l in states_to_corrupt_1st_pass:
+            corrupt_spec_1st_pass[l].append(t)
+    else:
+        corrupt_spec_1st_pass[embed_layername] = tokens_to_mix_indices_1st_pass
+
+
     # Define the model-patching rule for the 2nd (main) pass.
     def patch_rep(x, layer):
-        if layer == embed_layername:
-            # If requested, we corrupt a range of token embeddings on batch items x[1:]
-            if tokens_to_mix is not None:
-                # b, e = tokens_to_mix
-                # x[1:, b:e] += noise * torch.from_numpy(
-                #     prng(x.shape[0] - 1, e - b, x.shape[2])
-                # ).to(x.device)
-                # print(f'* 2nd pass, layer: {layer}, corrupting: {tokens_to_mix_indices}')
-                mix_len = len(tokens_to_mix_indices)
+        # if layer == embed_layername:
+        #     # If requested, we corrupt a range of token embeddings on batch items x[1:]
+        #     if tokens_to_mix is not None:
+        #         mix_len = len(tokens_to_mix_indices)
+        #         noise_data = noise_fn(
+        #             torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
+        #         ).to(device=x.device, dtype=x.dtype)
+
+        #         if replace:
+        #             x[1:, tokens_to_mix_indices] = noise_data
+        #         else:
+        #             x[1:, tokens_to_mix_indices] += noise_data
+        #     return x
+
+        # if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
+        if (layer not in patch_spec) and (layer not in unpatch_spec) and (layer not in corrupt_spec):
+            return x
+
+        h = untuple(x)
+        if layer in corrupt_spec:
+            toks_to_mix = corrupt_spec[layer]
+            if toks_to_mix:
+                mix_len = len(toks_to_mix)
                 noise_data = noise_fn(
-                    # torch.from_numpy(prng(x.shape[0] - 1, e - b, x.shape[2]))
-                    torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
-                ).to(device=x.device, dtype=x.dtype)
+                    torch.from_numpy(prng(h.shape[0] - 1, mix_len, h.shape[2]))
+                ).to(device=h.device, dtype=h.dtype)
 
                 if replace:
-                    x[1:, tokens_to_mix_indices] = noise_data
+                    h[1:, toks_to_mix] = noise_data
                 else:
-                    x[1:, tokens_to_mix_indices] += noise_data
-            return x
-        if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
-            return x
+                    h[1:, toks_to_mix] += noise_data
+
         # If this layer is in the patch_spec, restore the uncorrupted hidden state
         # for selected tokens.
-        h = untuple(x)
         toks_to_patch = patch_spec.get(layer, [])
         toks_to_unpatch = unpatch_spec.get(layer, [])
         # if toks_to_patch:
@@ -312,36 +348,31 @@ def run_repatch_uskg_multi_token(
             h[1:, t] = untuple(first_pass_trace[layer].output)[1:, t]
         return x
 
-    # Define the model-patching rule for the 1st pass.
+    # Define the model-patching rule for the 1st pass. (difference: no unpatch here)
     def patch_rep_1st_pass(x, layer):
-        if layer == embed_layername:
-            # If requested, we corrupt a range of token embeddings on batch items x[1:]
-            if tokens_to_mix_1st_pass is not None:
-                # b, e = tokens_to_mix
-                # x[1:, b:e] += noise * torch.from_numpy(
-                #     prng(x.shape[0] - 1, e - b, x.shape[2])
-                # ).to(x.device)
-                # print(f'* 1st pass, layer: {layer}, corrupting: {tokens_to_mix_indices_1st_pass}')
-                mix_len = len(tokens_to_mix_indices_1st_pass)
+        if (layer not in patch_spec_1st_pass) and (layer not in corrupt_spec_1st_pass):
+            return x
+
+        if layer in corrupt_spec_1st_pass:
+            toks_to_mix = corrupt_spec_1st_pass[layer]
+            if toks_to_mix:
+                mix_len = len(toks_to_mix)
                 noise_data = noise_fn(
-                    # torch.from_numpy(prng(x.shape[0] - 1, e - b, x.shape[2]))
                     torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
                 ).to(device=x.device, dtype=x.dtype)
 
                 if replace:
-                    x[1:, tokens_to_mix_indices_1st_pass] = noise_data
+                    x[1:, toks_to_mix] = noise_data
                 else:
-                    x[1:, tokens_to_mix_indices_1st_pass] += noise_data
-            return x
-        # if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
-        if layer not in patch_spec_1st_pass:
-            return x
+                    x[1:, toks_to_mix] += noise_data
+
         # If this layer is in the patch_spec, restore the uncorrupted hidden state
         # for selected tokens.
         h = untuple(x)
         toks_to_patch = patch_spec_1st_pass.get(layer, [])
         # if toks_to_patch:
         #     print(f'* 1st pass, layer: {layer}, restoring: {toks_to_patch}')
+
         for t in toks_to_patch:
             h[1:, t] = h[0, t]
         return x
@@ -352,7 +383,8 @@ def run_repatch_uskg_multi_token(
     for first_pass in [True, False] if states_to_unpatch else [False]:
         with torch.no_grad(), nethook.TraceDict(
             model,
-            [embed_layername] + list(patch_spec.keys()) + list(unpatch_spec.keys()) + list(patch_spec_1st_pass.keys()),
+            list(corrupt_spec.keys()) + list(patch_spec.keys()) + list(unpatch_spec.keys()) + \
+                list(corrupt_spec_1st_pass.keys()) + list(patch_spec_1st_pass.keys()),
             edit_output=patch_rep_1st_pass if first_pass else patch_rep,
         ) as td:
             # outputs_exp = model(**inp)
@@ -376,12 +408,16 @@ def run_repatch_uskg_multi_token(
 def trace_with_repatch_uskg_multi_token(
     model,  # The model
     inp,  # A set of inputs
+    answers_t,         # Answer length to collect
     states_to_patch,    # A list of (token index, layername) triples to restore
     states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-    answers_t,      # Answer probabilities to collect
-    tokens_to_mix,  # Range of tokens to corrupt (begin, end)
-    states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
+    states_to_corrupt=None,     # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix`
+    tokens_to_mix=None,         # Range of tokens to corrupt (begin, end)
+    # ------ 1st pass related args ------
+    states_to_patch_1st_pass=None,      # states to restore for the 1st pass (default: empty)
+    states_to_corrupt_1st_pass=None,    # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix_1st_pass`
     tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
+    # ------ other args ------
     tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
     noise=0.1,  # Level of noise to add
     uniform_noise=False,
@@ -396,9 +432,11 @@ def trace_with_repatch_uskg_multi_token(
         inp=inp,
         states_to_patch=states_to_patch,
         states_to_unpatch=states_to_unpatch,
+        states_to_corrupt=states_to_corrupt,
         answer_len=len(answers_t),
         tokens_to_mix=tokens_to_mix,
         states_to_patch_1st_pass=states_to_patch_1st_pass,
+        states_to_corrupt_1st_pass=states_to_corrupt_1st_pass,
         tokens_to_mix_1st_pass=tokens_to_mix_1st_pass,
         tokens_to_mix_individual_indices=tokens_to_mix_individual_indices,
         noise=noise,
@@ -448,6 +486,270 @@ def trace_with_repatch_uskg(*args, **kwargs):
         all_ans_probs = ret
         probs = min(all_ans_probs)
         return probs
+
+
+
+def run_attention_manip_uskg_multi_token(
+    model,  # The model
+    inp,  # A set of inputs
+    answer_len,         # Answer length to collect
+    # states_to_patch,    # A list of (token index, layername) triples to restore
+    # states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
+    # states_to_corrupt=None,     # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix`
+    layers_to_mix,      # A list of layername to corrupt. Has to be attention layers!
+    src_tokens_to_mix,    # In the attention mat, what src indices to mix.
+    tgt_tokens_to_mix,    # In the attention mat, what tgt indices to mix.
+    # TODO: replace with masking (build_mask_fn, build_mask_kwargs) to enable finer control 
+    # ------ 1st pass related args ------
+    # states_to_patch_1st_pass=None,      # states to restore for the 1st pass (default: empty) (Previously this is default to `list()` instead of None; not sure why is that)
+    # states_to_corrupt_1st_pass=None,    # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix_1st_pass`
+    # tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
+    # ------ other args ------
+    # tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
+    # noise=0.1,  # Level of noise to add
+    # uniform_noise=False,
+    replace=True,  # True to replace with instead of add noise; TODO
+    # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
+    # return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
+):
+    """
+    AAAA
+    Tracing function specifically for manipulating attention weights / logits
+    """
+    # rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    # if uniform_noise:
+    #     prng = lambda *shape: rs.uniform(-1, 1, shape)
+    # else:
+    #     prng = lambda *shape: rs.randn(*shape)
+    # patch_spec = defaultdict(list)
+    # for t, l in states_to_patch:
+    #     patch_spec[l].append(t)
+#     unpatch_spec = defaultdict(list)
+#     for t, l in states_to_unpatch:
+#         unpatch_spec[l].append(t)
+#     patch_spec_1st_pass = defaultdict(list)
+#     if states_to_patch_1st_pass:
+#         for t, l in states_to_patch_1st_pass:
+#             patch_spec_1st_pass[l].append(t)
+
+#     embed_layername = layername_uskg(model, "encoder", 0, "embed")
+
+    # def untuple(x):
+    #     return x[0] if isinstance(x, tuple) else x
+    
+    # # Define the model-patching rule.
+    # if isinstance(noise, float):
+    #     noise_fn = lambda x: noise * x
+    # else:
+    #     noise_fn = noise
+
+#     # Decide the tokens to mix
+#     if tokens_to_mix is None:
+#         tokens_to_mix_indices = None
+#     elif tokens_to_mix_individual_indices:
+#         tokens_to_mix_indices = tokens_to_mix
+#     else:
+#         tokens_to_mix_indices = list(range(*tokens_to_mix))
+
+#     if tokens_to_mix_1st_pass is None:
+#         tokens_to_mix_indices_1st_pass = None
+#     elif tokens_to_mix_individual_indices:
+#         tokens_to_mix_indices_1st_pass = tokens_to_mix_1st_pass
+#     else:
+#         tokens_to_mix_indices_1st_pass = list(range(*tokens_to_mix_1st_pass))
+
+#     # Decide the corruption spec
+#     assert (states_to_corrupt is None) or (tokens_to_mix is None), \
+#         "Can't pass both `states_to_corrupt` and `tokens_to_mix`"
+#     corrupt_spec = defaultdict(list)
+#     if states_to_corrupt is not None:
+#         for t, l in states_to_corrupt:
+#             corrupt_spec[l].append(t)
+#     elif tokens_to_mix is not None:
+# #         corrupt_spec[embed_layername] = tokens_to_mix_indices
+#         assert False
+
+#     assert (states_to_corrupt_1st_pass is None) or (tokens_to_mix_1st_pass is None), \
+#         "Can't pass both `states_to_corrupt_1st_pass` and `tokens_to_mix_1st_pass`"
+#     corrupt_spec_1st_pass = defaultdict(list)
+#     if states_to_corrupt_1st_pass is not None:
+#         for t, l in states_to_corrupt_1st_pass:
+#             corrupt_spec_1st_pass[l].append(t)
+#     else:
+#         corrupt_spec_1st_pass[embed_layername] = tokens_to_mix_indices_1st_pass
+
+
+#     # Define the model-patching rule for the 2nd (main) pass.
+#     def patch_rep(x, layer):
+#         # if layer == embed_layername:
+#         #     # If requested, we corrupt a range of token embeddings on batch items x[1:]
+#         #     if tokens_to_mix is not None:
+#         #         mix_len = len(tokens_to_mix_indices)
+#         #         noise_data = noise_fn(
+#         #             torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
+#         #         ).to(device=x.device, dtype=x.dtype)
+
+#         #         if replace:
+#         #             x[1:, tokens_to_mix_indices] = noise_data
+#         #         else:
+#         #             x[1:, tokens_to_mix_indices] += noise_data
+#         #     return x
+
+#         # if first_pass or (layer not in patch_spec and layer not in unpatch_spec):
+#         if (layer not in patch_spec) and (layer not in unpatch_spec) and (layer not in corrupt_spec):
+#             return x
+
+#         h = untuple(x)
+#         if layer in corrupt_spec:
+#             toks_to_mix = corrupt_spec[layer]
+#             if toks_to_mix:
+#                 mix_len = len(toks_to_mix)
+                
+#                 mix_mask = torch.zeros_like(h).bool()
+#                 mix_mask[1:, toks_to_mix, tensor_seq_indices_to_mix]
+#                 a
+#                 noise_data = noise_fn(
+#                     torch.from_numpy(prng(h.shape[0] - 1, mix_len, h.shape[2]))
+#                 ).to(device=h.device, dtype=h.dtype)
+
+#                 if replace:
+#                     h[1:, toks_to_mix] = noise_data
+#                 else:
+#                     h[1:, toks_to_mix] += noise_data
+
+#         # If this layer is in the patch_spec, restore the uncorrupted hidden state
+#         # for selected tokens.
+#         toks_to_patch = patch_spec.get(layer, [])
+#         # toks_to_unpatch = unpatch_spec.get(layer, [])
+#         # if toks_to_patch:
+#         #     print(f'* 2nd pass, layer: {layer}, restoring: {toks_to_patch}')
+#         # if toks_to_unpatch:
+#         #     print(f'* 2nd pass, layer: {layer}, unpatching: {toks_to_unpatch}')
+
+#         for t in toks_to_patch:
+#             h[1:, t] = h[0, t]
+#         # for t in toks_to_unpatch:
+#         #    h[1:, t] = untuple(first_pass_trace[layer].output)[1:, t]
+#         return x
+
+
+#     # With the patching rules defined, run the patched model in inference.
+#     first_pass_outputs_exp = None
+#     for first_pass in [True, False] if states_to_unpatch else [False]:
+#         with torch.no_grad(), nethook.TraceDict(
+#             model,
+#             list(corrupt_spec.keys()) + list(patch_spec.keys()) + list(unpatch_spec.keys()) + \
+#                 list(corrupt_spec_1st_pass.keys()) + list(patch_spec_1st_pass.keys()),
+#             edit_output=patch_rep_1st_pass if first_pass else patch_rep,
+#         ) as td:
+#             # outputs_exp = model(**inp)
+#             outputs_exp = run_model_forward_uskg(model, **inp)
+#             if first_pass:
+#                 first_pass_trace = td
+#                 first_pass_outputs_exp = outputs_exp
+
+    all_hooks = []
+    
+    for layer in layers_to_mix:
+        def _func_factory(src_tokens_to_mix, tgt_tokens_to_mix):
+            def _attn_w_fn(attn):
+                # Must separately use two lists, otherwise it's treated as a gather()
+                assert max(src_tokens_to_mix) < attn.size(2), (src_tokens_to_mix, attn.size())
+                assert max(tgt_tokens_to_mix) < attn.size(3), (tgt_tokens_to_mix, attn.size())
+                _t = attn[1:, :, src_tokens_to_mix]
+                _t[:, :, :, tgt_tokens_to_mix] = 0.0
+                attn[1:, :, src_tokens_to_mix] = _t
+                # print(k_tokens_to_mix, v_tokens_to_mix)
+                return attn
+            def _pre_forward_hook_fn(m, inp):
+                m.ext_attention_weights_fn = _attn_w_fn
+            def _forward_hook_fn(m, inp, outp):
+                m.ext_attention_weights_fn = None
+            
+            return _pre_forward_hook_fn, _forward_hook_fn
+            
+        p_hook_fn, f_hook_fn = _func_factory(src_tokens_to_mix, tgt_tokens_to_mix)
+        m = nethook.get_module(model, layer)
+        # print(m)
+        p_hook = m.register_forward_pre_hook(p_hook_fn)
+        f_hook = m.register_forward_hook(f_hook_fn)
+        all_hooks.extend([p_hook, f_hook])
+
+    outputs_exp = run_model_forward_uskg(model, **inp)
+    
+    for hook in all_hooks:
+        hook.remove()
+    
+    # Here we report softmax probabilities for the answer positions.
+    probs = torch.softmax(outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+#     if return_first_pass_preds:
+#         probs_pass1 = torch.softmax(first_pass_outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+
+#     if return_first_pass_preds:
+#         return probs, probs_pass1
+#     else:
+#         return probs
+    return probs
+
+def trace_attention_manip_uskg_multi_token(    
+    model,  # The model
+    inp,  # A set of inputs
+    answers_t,         # Answer tensor
+    # states_to_patch,    # A list of (token index, layername) triples to restore
+    # states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
+    # states_to_corrupt=None,     # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix`
+    layers_to_mix,      # A list of layername to corrupt. Has to be attention layers!
+    src_tokens_to_mix,    # In the attention mat, what src indices to mix.
+    tgt_tokens_to_mix,    # In the attention mat, what tgt indices to mix.
+    # TODO: replace with masking (build_mask_fn, build_mask_kwargs) to enable finer control 
+    # ------ 1st pass related args ------
+    # states_to_patch_1st_pass=None,      # states to restore for the 1st pass (default: empty) (Previously this is default to `list()` instead of None; not sure why is that)
+    # states_to_corrupt_1st_pass=None,    # A list of (token index, layername) triples to corrupt; exclusive with `tokens_to_mix_1st_pass`
+    # tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
+    # ------ other args ------
+    # tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
+    # noise=0.1,  # Level of noise to add
+    # uniform_noise=False,
+    replace=True,  # True to replace with instead of add noise
+    # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
+    # return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
+):
+
+    vocab_probs = run_attention_manip_uskg_multi_token(
+        model=model,
+        inp=inp,
+        answer_len=len(answers_t),
+        layers_to_mix=layers_to_mix,
+        src_tokens_to_mix=src_tokens_to_mix,
+        tgt_tokens_to_mix=tgt_tokens_to_mix,
+        replace=replace,
+    )
+
+    # We report softmax probabilities for the answers_t token predictions of interest.
+    # probs = torch.softmax(outputs_exp.logits[1:, -1, :], dim=1).mean(dim=0)[answers_t]
+    # (YS) allowing multi-token answers_t
+    all_ans_probs = []
+    # pass1_all_ans_probs = []
+
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        probs = vocab_probs[i, _t]
+        all_ans_probs.append(probs)
+
+    #     if return_first_pass_preds:
+    #         probs_1 = pass1_vocab_probs[i, _t]
+    #         pass1_all_ans_probs.append(probs_1)
+
+    # if return_first_pass_preds:
+    #     return all_ans_probs, pass1_all_ans_probs
+    # else:
+    #     return all_ans_probs
+
+    probs = min(all_ans_probs)
+    return probs
+
+
 
 
 def token_corruption_influence_uskg(
@@ -1866,8 +2168,10 @@ def predict_with_repatch(
         pred_len,
         states_to_patch,    # A list of (token index, layername) triples to restore
         states_to_unpatch,  # A list of (token index, layername) triples to re-randomize
-        tokens_to_mix,  # Range of tokens to corrupt (begin, end)
-        states_to_patch_1st_pass=list(),    # states to restore for the 1st pass (default: empty)
+        states_to_corrupt=None,
+        tokens_to_mix=None,  # Range of tokens to corrupt (begin, end)
+        states_to_patch_1st_pass=None,      # states to restore for the 1st pass (default: empty)
+        states_to_corrupt_1st_pass=None,
         tokens_to_mix_1st_pass=None,        # tokens to corrupt in the 1st pass (default: None)
         tokens_to_mix_individual_indices=False,     # If False (default), `tokens_to_mix` is a range; if True, `tokens_to_mix` is a list of indices
         noise=0.1,  # Level of noise to add
@@ -1881,9 +2185,11 @@ def predict_with_repatch(
         inp=inp,
         states_to_patch=states_to_patch,
         states_to_unpatch=states_to_unpatch,
+        states_to_corrupt=states_to_corrupt,
         answer_len=pred_len,
         tokens_to_mix=tokens_to_mix,
         states_to_patch_1st_pass=states_to_patch_1st_pass,
+        states_to_corrupt_1st_pass=states_to_corrupt_1st_pass,
         tokens_to_mix_1st_pass=tokens_to_mix_1st_pass,
         tokens_to_mix_individual_indices=tokens_to_mix_individual_indices,
         noise=noise,

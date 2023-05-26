@@ -768,6 +768,20 @@ def nested_list_processing(nl, func):
     else:
         return func(nl)
 
+def nested_json_processing(obj, func):
+    """
+    obj: a nested json object (with lists and dicts)
+    func: a Callable to process each "leaf" item in `obj`
+    """
+    if isinstance(obj, list):
+        processed_obj = [nested_json_processing(elem, func) for elem in obj]
+        return processed_obj
+    elif isinstance(obj, dict):
+        processed_obj = {k : nested_json_processing(v, func) for k, v in obj.items()}
+        return processed_obj
+    else:
+        return func(obj)
+
 # def plot_uskg_enc_attention(d, savepdf=None):
 #     ## Assume 16 heads, 24 layers (T5 large config)
     
