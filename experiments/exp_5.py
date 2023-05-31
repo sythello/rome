@@ -242,7 +242,7 @@ def trace_exp5_2_attention_section_removal_effect(
     context_ranges = a_ex['context_ranges']
 
     self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
-    context_tok_indices = corrupt_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
+    struct_context_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
     text_tok_indices = list(range(*text_range))
     struct_tok_indices = list(range(*struct_range))
     prefix_len = mt.model.preseqlen
@@ -296,6 +296,10 @@ def trace_exp5_2_attention_section_removal_effect(
         'self': [i + prefix_len for i in self_tok_indices],
         'struct': [i + prefix_len for i in struct_tok_indices],
         'text+struct': [i + prefix_len for i in text_tok_indices + struct_tok_indices],
+        ## ADDED
+        'struct_context': [i + prefix_len for i in struct_context_tok_indices],
+        'text+struct_context': [i + prefix_len for i in text_tok_indices + struct_context_tok_indices],
+        ## END
         'all': list(range(prefix_len)) + [i + prefix_len for i in text_tok_indices + struct_tok_indices],
     }
 
@@ -333,7 +337,7 @@ def trace_exp5_2_attention_section_removal_effect(
 
     for att_section, tgt_indices in att_sections_dict.items():
         ## TEMP: only run for newly added sections
-        if att_section != 'self':
+        if 'struct_context' not in att_section:
             continue
         ## END TEMP
         # window
@@ -539,9 +543,9 @@ def trace_exp5_3_attention_section_mutual_removal(
 
     for mix_k, mix_mask in att_mix_mask_dict.items():
         ## TEMP: only run for newly added sections
-        # if att_section != 'self':
-        #     continue
-        ## END TEMP
+        if 'c' not in mix_k:
+            continue
+        # END TEMP
         # window
         for layer_id in range(N_layers):
             _score = ctu.trace_attention_manip_uskg_multi_token(
@@ -673,7 +677,7 @@ def main_sdra_5_2_attention_section_removal_effect(args):
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=5.2.1+self_{args.ds}_{args.subject_type}_{args.part}-attn={args.attn_type}-corrupt={args.corrupt_type}-tmp'
+    exp_name = f'exp=5.2.1+structcontext_{args.ds}_{args.subject_type}_{args.part}-attn={args.attn_type}-corrupt={args.corrupt_type}'
     result_save_dir = os.path.join(args.result_dir, 'exp5_2_attention_section_removal_effect')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
@@ -690,8 +694,8 @@ def main_sdra_5_2_attention_section_removal_effect(args):
 
     f = open(result_save_path, 'w')
     start_id = 0
-    # end_id = n_ex
-    end_id = 20
+    end_id = n_ex
+    # end_id = 20
     stride = 1
     # with open(result_save_path, 'w') as f:
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
@@ -855,13 +859,13 @@ def main():
     ctu.evaluate_hardness.evaluator = ctu.load_evaluator(args)
 
     args.subject_type = 'column'
-    main_sdra_5_3_attention_section_mutual_removal(args)
+    main_sdra_5_2_attention_section_removal_effect(args)
 
     args.subject_type = 'table'
-    main_sdra_5_3_attention_section_mutual_removal(args)
+    main_sdra_5_2_attention_section_removal_effect(args)
 
     args.subject_type = 'table_alias'
-    main_sdra_5_3_attention_section_mutual_removal(args)
+    main_sdra_5_2_attention_section_removal_effect(args)
 
 
 
