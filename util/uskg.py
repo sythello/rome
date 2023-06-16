@@ -109,6 +109,18 @@ RAT_SQL_RELATION_ID2NAME = {
 
 REL2ID = {v : k for k, v in RAT_SQL_RELATION_ID2NAME.items()}
 
+# Need delimiters around to identify
+SQL_SYNTAX_PHRASES = [
+    'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'from', 'where', 'group by',
+    'having', 'order by', 'join', 'union', 'in', 'like', 'between', 'null', 'distinct', 'as', 'inner join',
+    'left join', 'right join', 'full outer join', 'on', 'not', 'exists', 'all', 'any', 'avg', 'sum', 'count',
+    'max', 'min', 'and', 'or', 'not', '=', '<>', '!=', '<', '>', '<=', '>=', '*'
+]
+
+# Don't need delimiters around to identify 
+# There is a tricky col-name "official_ratings_(millions)"; luckily it never appears in gold SQL
+SQL_SYNTAX_PUNCTS = ['(', ')', ',', '.', '"', "'", '%']
+
 
 def load_model_uskg(model_name, untie_embeddings=False):
     save_argv = sys.argv
@@ -426,6 +438,49 @@ def separate_punct(s, exclude='_'):
     return sep_s
 
 
+def separate_punct_by_offset(seq):
+    """
+    BBBB 
+    avg(age), min(age)  ==>  avg ( age ) , min ( age )
+    exclude (Iterable): the puncts not to separate (e.g. "_" as in "pet_type")
+    by default: _ (song_name)
+    include: . (t1.age -> t1 . age)   % ('%hey%' -> ' % hey % ')
+
+    Other updates:
+        keep multi-punct operators, include "<=", ">=", "<>", "!="
+        (keep the dot with preceding alias. For example: t1.age -> t1. age)
+    """
+
+    SP = ["<=", ">=", "<>", "!="]
+
+    # sep_punct = ''.join([c for c in string.punctuation if c not in exclude])
+    # sep_pattern = fr'[{re.escape(sep_punct)}]|\W+'
+    sep_pattern = r'\s+|\W'     # spaces or single punct
+    
+    all_matches = re.finditer(sep_pattern, seq)
+    splits = [0] + [i for m in all_matches for i in m.span()] + [len(seq)]
+    splits = sorted(list(set(splits)))
+
+    tok_ranges = []
+    st = 0  # start of next tok
+    for s, e in zip(splits[:-1], splits[1:]):
+        if not seq[s:e].strip():
+            # is a whitespace
+            st = e
+        else:
+            # is a real tok
+            if (e == s+1) and (seq[s : s+2] in SP):
+                # SP operators: wait next
+                continue
+            if re.match(r't\d+\.', seq[s : e+1]):
+                # alias
+                continue
+            tok_ranges.append((st, e))
+            st = e
+
+    return tok_ranges
+
+
 def decode_tokens(tokenizer, token_array):
     if hasattr(token_array, "shape") and len(token_array.shape) > 1:
         return [decode_tokens(tokenizer, row) for row in token_array]
@@ -622,6 +677,26 @@ def make_dec_prompt(dec_target, subject):
     assert prompts, (dec_target, subject)
     
     return prompts
+
+
+# def make_syntax_dec_prompt(dec_target, syntax_subject, is_punct=False):
+#     dec_target = ' ' + dec_target + ' '
+
+#     prompts = []
+
+#     syntax_subject = re.escape(syntax_subject)
+#     _pat = fr'({syntax_subject})' if is_punct else fr'\W({syntax_subject})\W'
+
+#     m_iter = re.finditer(_pat, dec_target)   # syntax punct can go with text
+#     for m in m_iter:
+#         s, e = m.span(1)
+#         prompt = dec_target[:s].strip()
+#         prompts.append(prompt)
+
+#     assert prompts, (dec_target, syntax_subject, is_punct)
+
+#     return prompts
+
 
 def ensure_list(x):
     """ If x is singleton (int, float, etc.), make it a singleton-list """

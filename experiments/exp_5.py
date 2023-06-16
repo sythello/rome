@@ -239,17 +239,17 @@ def trace_exp5_2_attention_section_removal_effect(
     struct_range = a_ex['struct_range']
 
     self_ranges = a_ex['self_ranges']
-    context_ranges = a_ex['context_ranges']
+    struct_context_ranges = a_ex['context_ranges']
 
     self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
-    struct_context_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
+    struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
     text_tok_indices = list(range(*text_range))
     struct_tok_indices = list(range(*struct_range))
     prefix_len = mt.model.preseqlen
 
     result = ctu.make_basic_result_dict(a_ex)
     result['self_ranges'] = self_ranges
-    result['struct_context_ranges'] = context_ranges
+    result['struct_context_ranges'] = struct_context_ranges
 
     ## Check basic results
     n_samples = 2 if corrupt_type == 'zero' else 11     # "zero" doesn't have randomness 
@@ -403,7 +403,7 @@ def trace_exp5_3_attention_section_mutual_removal(
 ):
     """
     AAA
-    Exp5.3 (attention-section-mutual-removal)
+    Exp5.3.1 (attention-section-mutual-removal)
     Check the effect of disabling attention between certain sections (prefix, text, struct)
     """
 
@@ -419,17 +419,20 @@ def trace_exp5_3_attention_section_mutual_removal(
     struct_range = a_ex['struct_range']
 
     self_ranges = a_ex['self_ranges']
-    context_ranges = a_ex['context_ranges']
+    struct_context_ranges = a_ex['context_ranges']
 
     self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
-    context_tok_indices = corrupt_tok_indices = [i for s, e in context_ranges for i in range(s, e)]
+    struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
     text_tok_indices = list(range(*text_range))
     struct_tok_indices = list(range(*struct_range))
     prefix_len = mt.model.preseqlen
 
+    self_tok_indices_tgt_side = [i + prefix_len for i in self_tok_indices]
+    struct_context_tok_indices_tgt_side = [i + prefix_len for i in struct_context_tok_indices]
+
     result = ctu.make_basic_result_dict(a_ex)
     result['self_ranges'] = self_ranges
-    result['struct_context_ranges'] = context_ranges
+    result['struct_context_ranges'] = struct_context_ranges
 
     ## Check basic results
     n_samples = 2 if corrupt_type == 'zero' else 11     # "zero" doesn't have randomness 
@@ -456,7 +459,8 @@ def trace_exp5_3_attention_section_mutual_removal(
     
     base_score = result['base_score']
 
-    """ Low score of exp 5.3: corrupting all attention between sections for all layers """
+    # """ Low score of exp 5.3: corrupting all attention between sections for all layers """
+    """ Low score of exp 5.3.1: corrupting all attention weights (should be identical to exp5.0) """
 
     # if corrupt_type == 'add':
     #     noise = 0.1
@@ -507,7 +511,40 @@ def trace_exp5_3_attention_section_mutual_removal(
 
     att_mix_mask_dict['ts->p'] = t2p_mask | s2p_mask
 
-    att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
+    # ADDED: section self-attention
+    t2t_mask = torch.zeros_like(t2s_mask).bool()
+    t2t_mask[:, :, text_st : text_ed, text_st + prefix_len : text_ed + prefix_len] = True
+    att_mix_mask_dict['t->t'] = t2t_mask
+
+    s2s_mask = torch.zeros_like(t2s_mask).bool()
+    s2s_mask[:, :, struct_st : struct_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['s->s'] = s2s_mask
+
+    # ADDED: regarding struct context
+    # Notice that it's ok to have 1 list in indexing, but not ok to have 2
+    # If there are 2 lists, it will become a "gather()" which treats the 2 lists in a zipped way
+    s2c_mask = torch.zeros_like(t2s_mask).bool()
+    s2c_mask[:, :, struct_st : struct_ed, struct_context_tok_indices_tgt_side] = True
+    att_mix_mask_dict['s->c'] = s2c_mask
+
+    c2p_mask = torch.zeros_like(t2s_mask).bool()
+    c2p_mask[:, :, struct_context_tok_indices, :prefix_len] = True
+    att_mix_mask_dict['c->p'] = c2p_mask
+
+    # c2t: skipped, as already see even s2t is not so effective
+
+    c2s_mask = torch.zeros_like(t2s_mask).bool()
+    c2s_mask[:, :, struct_context_tok_indices, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['c->s'] = c2s_mask
+
+    c2c_mask = c2s_mask.clone()
+    c2c_mask[:, :, :, self_tok_indices_tgt_side] = False
+    assert c2c_mask.sum().item() == len(struct_context_tok_indices) ** 2, \
+        (c2c_mask.sum().item(), len(struct_context_tok_indices) ** 2)
+    att_mix_mask_dict['c->c'] = c2c_mask
+
+    # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
+    att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
 
     # breakpoint()
 
@@ -542,12 +579,15 @@ def trace_exp5_3_attention_section_mutual_removal(
         }
 
     for mix_k, mix_mask in att_mix_mask_dict.items():
-        ## TEMP: only run for newly added sections
-        if 'c' not in mix_k:
+        # TEMP: only run for newly added sections
+        # if 'c' not in mix_k:
+        if mix_k != 'c->p':
             continue
         # END TEMP
-        # window
-        for layer_id in range(N_layers):
+
+        # window (for speed, only compute on a subset of layers)
+        # for layer_id in range(N_layers):
+        for layer_id in range(3, N_layers, 4):
             _score = ctu.trace_attention_manip_uskg_multi_token(
                 model=mt.model,
                 inp=inp,
@@ -757,13 +797,13 @@ def main_sdra_5_2_attention_section_removal_effect(args):
 
 def main_sdra_5_3_attention_section_mutual_removal(args):
     """
-    Exp 5.3
+    Exp 5.3.1
     """
     spider_dataset_path = args.spider_dataset_path
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=5.3_{args.ds}_{args.subject_type}_{args.part}-attn={args.attn_type}-corrupt={args.corrupt_type}'
+    exp_name = f'exp=5.3.1+c2p_{args.ds}_{args.subject_type}_{args.part}-attn={args.attn_type}-corrupt={args.corrupt_type}'
     result_save_dir = os.path.join(args.result_dir, 'exp5_3_attention_section_mutual_removal')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
@@ -783,7 +823,7 @@ def main_sdra_5_3_attention_section_mutual_removal(args):
     end_id = n_ex
     # end_id = 20
     stride = 1
-    # stride = 333
+    # stride = 111
     # with open(result_save_path, 'w') as f:
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
         ex = processed_spider_dataset[ex_id]
@@ -859,13 +899,13 @@ def main():
     ctu.evaluate_hardness.evaluator = ctu.load_evaluator(args)
 
     args.subject_type = 'column'
-    main_sdra_5_2_attention_section_removal_effect(args)
+    main_sdra_5_3_attention_section_mutual_removal(args)
 
     args.subject_type = 'table'
-    main_sdra_5_2_attention_section_removal_effect(args)
+    main_sdra_5_3_attention_section_mutual_removal(args)
 
     args.subject_type = 'table_alias'
-    main_sdra_5_2_attention_section_removal_effect(args)
+    main_sdra_5_3_attention_section_mutual_removal(args)
 
 
 

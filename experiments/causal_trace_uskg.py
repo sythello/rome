@@ -28,9 +28,10 @@ from util import nethook
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NAME, \
+    SQL_SYNTAX_PHRASES, SQL_SYNTAX_PUNCTS, \
     load_model_uskg, load_raw_dataset, load_spider_dataset, run_model_forward_uskg, \
     decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
-    separate_punct, make_dec_prompt, parse_struct_in, ensure_list, \
+    separate_punct, separate_punct_by_offset, make_dec_prompt, parse_struct_in, ensure_list, \
     ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
     evaluate_hardness, detect_node_role, check_col_text_match, check_table_text_match, \
     parse_sql_alias2table, nested_list_processing, nested_json_processing
@@ -2325,6 +2326,10 @@ def create_analysis_sample_dicts(
             elif subject_type == 'table_alias':
                 node_table = alias2table[node]
                 text_match = check_table_text_match(ex, node_table)
+            
+            # Add node len directly in category
+            node_len = len(mt.tokenizer.tokenize(expect))
+            node_len_str = str(node_len) if node_len <= 3 else '4+'
 
             _ex = copy.deepcopy(ex)
             _ex['dec_prompt'] = dec_prompt
@@ -2344,6 +2349,7 @@ def create_analysis_sample_dicts(
                 'sql_hardness': sql_hardness,
                 'node_role': node_role,
                 'text_match': text_match,
+                'node_len': node_len_str,
             }
 
             analysis_ex_dicts.append(_ex)
@@ -2357,6 +2363,140 @@ def create_analysis_sample_dicts(
         # result['db_id'] = ex['db_id']
         # result['expect_input_indices'] = enc_token_range
     return analysis_ex_dicts
+
+
+
+def create_syntax_analysis_sample_dicts(
+        mt, 
+        ex, 
+        # subject_type,   # not yet used 
+        ):
+    """
+    BBBB
+    Create a new sample dict or analysis purpose, on syntax tokens 
+    Return:
+        analysis_ex_dicts: all basic info needed for any analysis
+    """
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+
+    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
+    enc_tokenized = mt.tokenizer(enc_sentence)
+    ex['enc_sentence'] = enc_sentence
+    ex['enc_tokenized'] = enc_tokenized
+
+    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
+    ex['text_range'] = text_range
+    ex['struct_range'] = struct_range
+    
+    parsed_struct_in = parse_struct_in(struct_in)
+    col2table = defaultdict(list)
+    node_name_counter = Counter()
+    db_id_t, tables = parsed_struct_in
+    for table_name_t, cols in tables:
+        _, table_name, _ = table_name_t
+        node_name_counter[table_name] += 1
+        for col_name_t, vals in cols:
+            _, col_name, _ = col_name_t
+            col2table[col_name].append(table_name)
+            node_name_counter[col_name] += 1
+
+    alias2table = parse_sql_alias2table(ex['seq_out'])
+
+    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
+    
+    # sql_tokens = separate_punct(ex['seq_out']).split(' ')
+    # sql_nodes = set()
+    # for t in sql_tokens:
+    #     if t in node_name_ranges:
+    #         sql_nodes.add(t)
+
+    # # Sanity checking
+    # _phrase_cache = []
+    # syntax_phrases = set()  # include operators like '<', '*' that can only be identified with delimiters (for example, '<' and '<=' are different)
+    # syntax_puncts = set()   # those don't need delimiter to identify; now, only '(', ')', ',', '%'
+    # for t in sql_tokens:
+    #     if t in list(alias2table.keys()) + list(node_name_counter.keys()):
+    #         # emit syntax phrase, if any
+    #         _phrase = ' '.join(_phrase_cache)
+    #         if _phrase:
+    #             assert _phrase in SQL_SYNTAX_PHRASES + SQL_SYNTAX_PUNCTS, (_phrase, sql_tokens)
+    #             if _phrase in SQL_SYNTAX_PHRASES:
+    #                 syntax_phrases.add(_phrase)
+    #             else:
+    #                 syntax_puncts.add(_phrase)
+    #         _phrase_cache = []
+    #     else:
+    #         _phrase_cache.append(t)
+    
+    # # (phrase, is_punct)
+    # syntax_targets = [(p, False) for p in syntax_phrases] + [(p, True) for p in syntax_puncts]
+    # syntax_targets.sort()
+
+    struct_node_list = [f'{als}.' for als in alias2table.keys()] + list(alias2table.keys()) + list(node_name_counter.keys())
+
+    # Add hardness info
+    sql_hardness = evaluate_hardness(ex['seq_out'], ex['db_id'])
+
+    _sql = ex['seq_out'].strip()
+    if _sql.endswith(';'):
+        _sql = _sql[:-1]
+    sql_token_char_spans = separate_punct_by_offset(_sql)
+
+    # for syntax_p, is_punct in syntax_targets:
+    #     dec_prompts = make_dec_prompt(ex['seq_out'], syntax_p)
+
+    analysis_ex_dicts = []
+    literal_quote = None      # Now only check literal within quotes (', ", `)
+    for tok_char_span in sql_token_char_spans:
+        s, e = tok_char_span
+        expect = ex['seq_out'][s : e] 
+        if expect in struct_node_list:
+            continue
+
+        dec_prompt = ex['seq_out'][:s].strip()
+        if len(dec_prompt) == 0:
+            # first token is always "select"; also, empty prompt is prone to bugs
+            continue
+
+        _ex = copy.deepcopy(ex)
+        _ex['dec_prompt'] = dec_prompt
+        _ex['expect'] = expect
+        _ex['expect_type'] = 'non_node'
+        # _ex['is_punct'] = (expect in SQL_SYNTAX_PUNCTS)
+        _ex['parsed_struct_in'] = parsed_struct_in
+        _ex['col2table'] = col2table
+        _ex['token_ranges_dict'] = token_ranges_dict
+        _ex['alias2table'] = alias2table
+
+        _ex['category'] = {
+            'sql_hardness': sql_hardness,
+        }
+
+        if (expect in ['"', "'", "`"]) and (literal_quote is None):
+            # entering quoted literal
+            literal_quote = expect
+        
+        _ex['in_quoted_literal'] = (literal_quote is not None)
+
+        if expect == literal_quote:
+            # exiting quoted literal
+            literal_quote = None
+
+        analysis_ex_dicts.append(_ex)
+
+        # result['expect'] = node      # actually already available in ['answer']
+        # result['subject_type'] = subject_type
+        # if subject_type == 'column':
+        #     result['table'] = col2table[node][0]    # col2table[node] is a list
+        # elif subject_type == 'table':
+        #     result['table'] = node
+        # result['db_id'] = ex['db_id']
+        # result['expect_input_indices'] = enc_token_range
+    return analysis_ex_dicts
+
+
 
 
 def add_clean_prediction(
@@ -2417,8 +2557,13 @@ def make_basic_result_dict(a_ex):
         'expect': a_ex['expect'],
         'expect_type': a_ex['expect_type'],
         'db_id': a_ex['db_id'],
-        'expect_input_ranges': a_ex['expect_input_ranges'],
+        # 'expect_input_ranges': a_ex['expect_input_ranges'],
     }
+
+    _optional_keys = ['expect_input_ranges', 'in_quoted_literal']
+    for k in _optional_keys:
+        if k in a_ex:
+            result_dict[k] = a_ex[k]
 
     node = a_ex['expect']
     col2table = a_ex['col2table']
