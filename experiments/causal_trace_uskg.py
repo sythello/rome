@@ -638,6 +638,115 @@ def trace_attention_manip_uskg_multi_token(
 trace_attention_manip_uskg_multi_token._warned_deprecate = False
 
 
+def build_enc_self_attention_mask(
+    a_ex,
+    seq_len=None,
+    mt=None,
+    prefix_len=10,
+    use_self_node=False):
+    """
+    BBBB
+    For attention-related experiments: build encoder self-attention masks across sections
+
+    Args:
+    a_ex (Dict)
+    seq_len (int): sequence length
+    prefix_len (int): prefix length
+    use_self_node (bool): whether to include sections for self_node and struct_context
+    """
+
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    # text_tok_indices = list(range(*text_range))
+    # struct_tok_indices = list(range(*struct_range))
+
+    if use_self_node:
+        expect_input_ranges = a_ex['expect_input_ranges']
+        tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+
+        self_ranges = a_ex['self_ranges']
+        struct_context_ranges = a_ex['context_ranges']
+
+        self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+        struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+        self_tok_indices_tgt_side = [i + prefix_len for i in self_tok_indices]
+        struct_context_tok_indices_tgt_side = [i + prefix_len for i in struct_context_tok_indices]
+
+    if seq_len is None:
+        # need to tokenize and decide seq_len
+        assert mt is not None
+        _tok_ids = mt.tokenizer.encode(enc_sentence)
+        seq_len = len(_tok_ids)
+
+
+    att_mix_mask_dict = dict()
+    # mix_mask: (batch, head, src_len, tgt_len)
+    
+    t2s_mask = torch.zeros(1, 1, seq_len, seq_len + prefix_len).bool()
+    t2s_mask[:, :, text_st : text_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['t->s'] = t2s_mask
+
+    s2t_mask = torch.zeros_like(t2s_mask).bool()
+    s2t_mask[:, :, struct_st : struct_ed, text_st + prefix_len : text_ed + prefix_len] = True
+    att_mix_mask_dict['s->t'] = s2t_mask
+
+    att_mix_mask_dict['t<->s'] = t2s_mask | s2t_mask
+
+    t2p_mask = torch.zeros_like(t2s_mask).bool()
+    t2p_mask[:, :, text_st : text_ed, :prefix_len] = True
+    att_mix_mask_dict['t->p'] = t2p_mask
+
+    s2p_mask = torch.zeros_like(t2s_mask).bool()
+    s2p_mask[:, :, struct_st : struct_ed, :prefix_len] = True
+    att_mix_mask_dict['s->p'] = s2p_mask
+
+    att_mix_mask_dict['ts->p'] = t2p_mask | s2p_mask
+
+    # ADDED: section self-attention
+    t2t_mask = torch.zeros_like(t2s_mask).bool()
+    t2t_mask[:, :, text_st : text_ed, text_st + prefix_len : text_ed + prefix_len] = True
+    att_mix_mask_dict['t->t'] = t2t_mask
+
+    s2s_mask = torch.zeros_like(t2s_mask).bool()
+    s2s_mask[:, :, struct_st : struct_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['s->s'] = s2s_mask
+
+    if use_self_node:
+        # ADDED: regarding struct context
+        # Notice that it's ok to have 1 list in indexing, but not ok to have 2
+        # If there are 2 lists, it will become a "gather()" which treats the 2 lists in a zipped way
+        s2c_mask = torch.zeros_like(t2s_mask).bool()
+        s2c_mask[:, :, struct_st : struct_ed, struct_context_tok_indices_tgt_side] = True
+        att_mix_mask_dict['s->c'] = s2c_mask
+
+        c2p_mask = torch.zeros_like(t2s_mask).bool()
+        c2p_mask[:, :, struct_context_tok_indices, :prefix_len] = True
+        att_mix_mask_dict['c->p'] = c2p_mask
+
+        # c2t: skipped, as already see even s2t is not so effective
+
+        c2s_mask = torch.zeros_like(t2s_mask).bool()
+        c2s_mask[:, :, struct_context_tok_indices, struct_st + prefix_len : struct_ed + prefix_len] = True
+        att_mix_mask_dict['c->s'] = c2s_mask
+
+        c2c_mask = c2s_mask.clone()
+        c2c_mask[:, :, :, self_tok_indices_tgt_side] = False
+        assert c2c_mask.sum().item() == len(struct_context_tok_indices) ** 2, \
+            (c2c_mask.sum().item(), len(struct_context_tok_indices) ** 2)
+        att_mix_mask_dict['c->c'] = c2c_mask
+
+    # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
+    att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
+
+    return att_mix_mask_dict
+
 
 def token_corruption_influence_uskg(
     mt,
@@ -2368,11 +2477,11 @@ def create_analysis_sample_dicts(
 
 def create_syntax_analysis_sample_dicts(
         mt, 
-        ex, 
-        # subject_type,   # not yet used 
+        ex,
+        include_literal=False,      # TODO: remove non-quoted literals (now only removing quoted ones)
         ):
     """
-    BBBB
+    BBB
     Create a new sample dict or analysis purpose, on syntax tokens 
     Return:
         analysis_ex_dicts: all basic info needed for any analysis
@@ -2460,11 +2569,28 @@ def create_syntax_analysis_sample_dicts(
             # first token is always "select"; also, empty prompt is prone to bugs
             continue
 
+        in_quoted_literal = False
+        if (expect in ['"', "'", "`"]) and (literal_quote is None):
+            # entering quoted literal
+            literal_quote = expect
+        elif expect == literal_quote:
+            # (must be that literal_quote is not None) exiting quoted literal
+            literal_quote = None
+            in_quoted_literal = True
+        
+        # just exiting quote (in which case it's True assigned above) OR staying inside a quoted literal
+        in_quoted_literal = in_quoted_literal or (literal_quote is not None)
+        # print(expect, '\t', literal_quote, '\t', in_quoted_literal)
+
+        if in_quoted_literal and (not include_literal):
+            # not include this sample with literal as expect
+            continue
+
         _ex = copy.deepcopy(ex)
         _ex['dec_prompt'] = dec_prompt
         _ex['expect'] = expect
         _ex['expect_type'] = 'non_node'
-        # _ex['is_punct'] = (expect in SQL_SYNTAX_PUNCTS)
+        _ex['in_quoted_literal'] = in_quoted_literal
         _ex['parsed_struct_in'] = parsed_struct_in
         _ex['col2table'] = col2table
         _ex['token_ranges_dict'] = token_ranges_dict
@@ -2473,16 +2599,6 @@ def create_syntax_analysis_sample_dicts(
         _ex['category'] = {
             'sql_hardness': sql_hardness,
         }
-
-        if (expect in ['"', "'", "`"]) and (literal_quote is None):
-            # entering quoted literal
-            literal_quote = expect
-        
-        _ex['in_quoted_literal'] = (literal_quote is not None)
-
-        if expect == literal_quote:
-            # exiting quoted literal
-            literal_quote = None
 
         analysis_ex_dicts.append(_ex)
 
