@@ -274,42 +274,49 @@ def trace_exp6_1_attention_corruption_effect_syntax(
     text_st, text_ed = text_range
     struct_st, struct_ed = struct_range
     
-    att_mix_mask_dict = dict()
-    # mix_mask: (batch, head, src_len, tgt_len)
+    att_mix_mask_dict = ctu.build_enc_self_attention_mask(
+        a_ex=a_ex,
+        seq_len=seq_len,
+        prefix_len=prefix_len,
+        use_self_node=False
+    )
+
+    # att_mix_mask_dict = dict()
+    # # mix_mask: (batch, head, src_len, tgt_len)
     
-    t2s_mask = torch.zeros(1, 1, seq_len, seq_len + prefix_len).bool()
-    t2s_mask[:, :, text_st : text_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
-    att_mix_mask_dict['t->s'] = t2s_mask
+    # t2s_mask = torch.zeros(1, 1, seq_len, seq_len + prefix_len).bool()
+    # t2s_mask[:, :, text_st : text_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
+    # att_mix_mask_dict['t->s'] = t2s_mask
 
-    s2t_mask = torch.zeros_like(t2s_mask).bool()
-    s2t_mask[:, :, struct_st : struct_ed, text_st + prefix_len : text_ed + prefix_len] = True
-    att_mix_mask_dict['s->t'] = s2t_mask
+    # s2t_mask = torch.zeros_like(t2s_mask).bool()
+    # s2t_mask[:, :, struct_st : struct_ed, text_st + prefix_len : text_ed + prefix_len] = True
+    # att_mix_mask_dict['s->t'] = s2t_mask
 
-    att_mix_mask_dict['t<->s'] = t2s_mask | s2t_mask
+    # att_mix_mask_dict['t<->s'] = t2s_mask | s2t_mask
 
-    t2p_mask = torch.zeros_like(t2s_mask).bool()
-    t2p_mask[:, :, text_st : text_ed, :prefix_len] = True
-    att_mix_mask_dict['t->p'] = t2p_mask
+    # t2p_mask = torch.zeros_like(t2s_mask).bool()
+    # t2p_mask[:, :, text_st : text_ed, :prefix_len] = True
+    # att_mix_mask_dict['t->p'] = t2p_mask
 
-    s2p_mask = torch.zeros_like(t2s_mask).bool()
-    s2p_mask[:, :, struct_st : struct_ed, :prefix_len] = True
-    att_mix_mask_dict['s->p'] = s2p_mask
+    # s2p_mask = torch.zeros_like(t2s_mask).bool()
+    # s2p_mask[:, :, struct_st : struct_ed, :prefix_len] = True
+    # att_mix_mask_dict['s->p'] = s2p_mask
 
-    att_mix_mask_dict['ts->p'] = t2p_mask | s2p_mask
+    # att_mix_mask_dict['ts->p'] = t2p_mask | s2p_mask
 
-    # ADDED: section self-attention
-    t2t_mask = torch.zeros_like(t2s_mask).bool()
-    t2t_mask[:, :, text_st : text_ed, text_st + prefix_len : text_ed + prefix_len] = True
-    att_mix_mask_dict['t->t'] = t2t_mask
+    # # ADDED: section self-attention
+    # t2t_mask = torch.zeros_like(t2s_mask).bool()
+    # t2t_mask[:, :, text_st : text_ed, text_st + prefix_len : text_ed + prefix_len] = True
+    # att_mix_mask_dict['t->t'] = t2t_mask
 
-    s2s_mask = torch.zeros_like(t2s_mask).bool()
-    s2s_mask[:, :, struct_st : struct_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
-    att_mix_mask_dict['s->s'] = s2s_mask
+    # s2s_mask = torch.zeros_like(t2s_mask).bool()
+    # s2s_mask[:, :, struct_st : struct_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
+    # att_mix_mask_dict['s->s'] = s2s_mask
 
-    # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
-    att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
+    # # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
+    # att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
 
-    # TODO Low score: section = all, layer = embed OR final_enc
+    ## Low score: section = all, layer = embed
     # corrupted_vocab_probs: (answer_len, vocab_size)
     corrupted_vocab_probs = ctu.run_attention_manip_uskg_multi_token(
         model=mt.model,
@@ -486,7 +493,7 @@ def main_sdra_6_1_attention_corruption_effect_syntax(args):
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=6.1_{args.ds}_{args.part}_corrupt={args.corrupt_type}'
+    exp_name = f'exp=6.1_{args.ds}_{args.part}_corrupt={args.corrupt_type}-tmp'
     result_save_dir = os.path.join(args.result_dir, 'exp6_1_attention_corruption_effect_syntax')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
@@ -501,8 +508,8 @@ def main_sdra_6_1_attention_corruption_effect_syntax(args):
 
     f = open(result_save_path, 'w')
     start_id = 0
-    end_id = n_ex
-    # end_id = 50
+    # end_id = n_ex
+    end_id = 10
     stride = 1
     # with open(result_save_path, 'w') as f:
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):

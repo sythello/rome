@@ -645,7 +645,7 @@ def build_enc_self_attention_mask(
     prefix_len=10,
     use_self_node=False):
     """
-    BBBB
+    BBB
     For attention-related experiments: build encoder self-attention masks across sections
 
     Args:
@@ -681,6 +681,7 @@ def build_enc_self_attention_mask(
 
     if seq_len is None:
         # need to tokenize and decide seq_len
+        # TODO: untested!
         assert mt is not None
         _tok_ids = mt.tokenizer.encode(enc_sentence)
         seq_len = len(_tok_ids)
@@ -744,6 +745,110 @@ def build_enc_self_attention_mask(
 
     # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
     att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
+
+    return att_mix_mask_dict
+
+
+
+def build_dec_cross_attention_mask(
+    a_ex,
+    enc_seq_len=None,
+    dec_seq_len=None,
+    mt=None,
+    prefix_len=10,
+    use_self_node=False):
+    """
+    BBB
+    For attention-related experiments: build decoder cross-attention (to encoder) masks across sections
+
+    Args:
+    a_ex (Dict): analysis ex with clean prediction
+    seq_len (int): sequence length
+    prefix_len (int): prefix length
+    use_self_node (bool): whether to include sections for self_node and struct_context
+    """
+
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+    answer_len = len(a_ex['answers_t'])
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    # text_tok_indices = list(range(*text_range))
+    # struct_tok_indices = list(range(*struct_range))
+
+    if use_self_node:
+        # expect_input_ranges = a_ex['expect_input_ranges']
+        # tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+
+        self_ranges = a_ex['self_ranges']
+        struct_context_ranges = a_ex['context_ranges']
+
+        self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+        struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+        self_tok_indices_tgt_side = [i + prefix_len for i in self_tok_indices]
+        struct_context_tok_indices_tgt_side = [i + prefix_len for i in struct_context_tok_indices]
+
+    if (enc_seq_len is None) or (dec_seq_len is None):
+        # need to tokenize and decide seq_len
+        # TODO: untested!
+        assert mt is not None
+        _tok_ids = mt.tokenizer.encode(enc_sentence)
+        enc_seq_len = len(_tok_ids)
+        _tok_ids = mt.tokenizer.encode(dec_prompt, add_special_tokens=False) # following make_inputs_t5, shouldn't add </s> for decoder
+        dec_seq_len = len(_tok_ids) + answer_len - 1
+
+
+    att_mix_mask_dict = dict()
+    # mix_mask: (batch, head, src_len, tgt_len)
+    # src_len: dec length (no prefix)
+    # tgt_len: enc length (with prefix)
+    
+    all_mask = torch.ones(1, 1, dec_seq_len, enc_seq_len + prefix_len).bool()
+    att_mix_mask_dict['all'] = all_mask
+
+    ans2t_mask = torch.zeros_like(all_mask)
+    ans2t_mask[:, :, -answer_len:, text_st + prefix_len : text_ed + prefix_len] = True
+    att_mix_mask_dict['ans->t'] = ans2t_mask
+    all2t_mask = torch.zeros_like(all_mask)
+    all2t_mask[:, :, :, text_st + prefix_len : text_ed + prefix_len] = True
+    att_mix_mask_dict['all->t'] = all2t_mask
+
+    ans2s_mask = torch.zeros_like(all_mask)
+    ans2s_mask[:, :, -answer_len:, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['ans->s'] = ans2s_mask
+    all2s_mask = torch.zeros_like(all_mask)
+    all2s_mask[:, :, :, struct_st + prefix_len : struct_ed + prefix_len] = True
+    att_mix_mask_dict['all->s'] = all2s_mask
+
+    ans2p_mask = torch.zeros_like(all_mask)
+    ans2p_mask[:, :, -answer_len:, :prefix_len] = True
+    att_mix_mask_dict['ans->p'] = ans2p_mask
+    all2p_mask = torch.zeros_like(all_mask)
+    all2p_mask[:, :, :, :prefix_len] = True
+    att_mix_mask_dict['all->p'] = all2p_mask
+
+    if use_self_node:
+        # ADDED: regarding struct context
+        # Notice that it's ok to have 1 list in indexing, but not ok to have 2
+        # If there are 2 lists, it will become a "gather()" which treats the 2 lists in a zipped way
+        ans2c_mask = torch.zeros_like(all_mask).bool()
+        ans2c_mask[:, :, -answer_len:, struct_context_tok_indices_tgt_side] = True
+        att_mix_mask_dict['ans->c'] = ans2c_mask
+        all2c_mask = torch.zeros_like(all_mask).bool()
+        all2c_mask[:, :, :, struct_context_tok_indices_tgt_side] = True
+        att_mix_mask_dict['all->c'] = all2c_mask
+
+        ans2self_mask = torch.zeros_like(all_mask).bool()
+        ans2self_mask[:, :, -answer_len:, self_tok_indices_tgt_side] = True
+        att_mix_mask_dict['ans->self'] = ans2self_mask
+        all2self_mask = torch.zeros_like(all_mask).bool()
+        all2self_mask[:, :, :, self_tok_indices_tgt_side] = True
+        att_mix_mask_dict['all->self'] = all2self_mask
 
     return att_mix_mask_dict
 
@@ -2676,7 +2781,7 @@ def make_basic_result_dict(a_ex):
         # 'expect_input_ranges': a_ex['expect_input_ranges'],
     }
 
-    _optional_keys = ['expect_input_ranges', 'in_quoted_literal']
+    _optional_keys = ['expect_input_ranges', 'in_quoted_literal', 'self_ranges', 'struct_context_ranges']
     for k in _optional_keys:
         if k in a_ex:
             result_dict[k] = a_ex[k]
