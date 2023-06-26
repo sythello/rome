@@ -414,8 +414,8 @@ def trace_exp6_1_attention_corruption_effect_syntax(
 def trace_exp6_2_decoder_cross_attention_corruption_syntax(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
-    part='encoder',         # 'encoder', 'decoder'
-    attn_type='self_attn',  # 'self_attn', 'cross_attn'
+    # part='encoder',         # 'encoder', 'decoder'
+    # attn_type='self_attn',  # 'self_attn', 'cross_attn'
     corrupt_type='zero',    # 'zero', 'replace', 'add'
     # window=10,              # the window size to try to corrupt
     device='cuda',
@@ -545,25 +545,10 @@ def trace_exp6_2_decoder_cross_attention_corruption_syntax(
 
     for mix_k, mix_mask in att_mix_mask_dict.items():
         # TEMP: only run for newly added sections
-        # if mix_k != 'c->p':
-        #     continue
+        if not mix_k.endswith('o'):
+            continue
         # END TEMP
 
-        # # window (for speed, only compute on a subset of layers)
-        # # for layer_id in range(N_layers):
-        # for layer_id in range(3, N_layers, 4):
-        #     _score = ctu.trace_attention_manip_uskg_multi_token(
-        #         model=mt.model,
-        #         inp=inp,
-        #         answers_t=answers_t,
-        #         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask
-        #                        for l in range(
-        #                             max(0, layer_id - window // 2),
-        #                             min(N_layers, layer_id + window // 2)
-        #                         )},
-        #     ).item()
-        #     result['trace_scores'][mix_k]['window'][layer_id] = _score
-        
         for layers_k, layers_range in layers_range_dict.items():
             _score = ctu.trace_attention_manip_uskg_multi_token(
                 model=mt.model,
@@ -759,7 +744,7 @@ def main_sdra_6_2_decoder_cross_attention_corruption_syntax(args):
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=6.2_{args.ds}_corrupt={args.corrupt_type}'
+    exp_name = f'exp=6.2+o_{args.ds}_corrupt={args.corrupt_type}'
     result_save_dir = os.path.join(args.result_dir, 'exp6_2_decoder_cross_attention_corruption_syntax')
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')

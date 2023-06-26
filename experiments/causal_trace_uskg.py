@@ -503,7 +503,7 @@ def run_attention_manip_uskg_multi_token(
     replace=True,  # True to replace with instead of add noise; TODO
 ):
     """
-    AAAA
+    AAA
     Tracing function specifically for manipulating attention weights / logits
     """
 
@@ -636,6 +636,206 @@ def trace_attention_manip_uskg_multi_token(
     return probs
 
 trace_attention_manip_uskg_multi_token._warned_deprecate = False
+
+
+
+def run_layer_copy_uskg_multi_token(
+    model,  # The model
+    inp,  # A set of inputs
+    answer_len,         # Answer length to collect
+    # TODO perhaps: to enable patch and unpatch
+    # states_to_patch,    # A list of (token index, layername) triples to restore (set to clean state)
+    # states_to_unpatch,  # A list of (token index, layername) triples to re-randomize (set to 1st run state)
+    states_to_copy_from,
+    states_to_copy_to,
+    states_to_corrupt=None,     # A list of (token index, layername) triples to corrupt (set to random state)
+    # ------ 1st pass related args ------
+    # states_to_patch_1st_pass=None,      # A list of (token index, layername) triples to restore in the 1st pass
+    states_to_corrupt_1st_pass=None,    # A list of (token index, layername) triples to corrupt in the 1st pass
+    # ------ other args ------
+    noise=0.1,  # Level of noise to add
+    uniform_noise=False,
+    replace=False,  # True to replace with instead of add noise
+    # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
+    return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
+):
+    
+    """
+    AAA
+    Layer copy: put the intermediate values of a (lower) layer into another (higher) layer, effectively skipping certain layers
+    (Not used for now; for exp7, directly using sublayer-zero is conceptually faster since it's single-run)
+    """
+
+    rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    if uniform_noise:
+        prng = lambda *shape: rs.uniform(-1, 1, shape)
+    else:
+        prng = lambda *shape: rs.randn(*shape)
+    copy_from_spec = defaultdict(list)
+    for t, l in states_to_copy_from:
+        copy_from_spec[l].append(t)
+    copy_to_spec = defaultdict(list)
+    for t, l in states_to_copy_to:
+        copy_to_spec[l].append(t)
+    # patch_spec_1st_pass = defaultdict(list)
+    # if states_to_patch_1st_pass:
+    #     for t, l in states_to_patch_1st_pass:
+    #         patch_spec_1st_pass[l].append(t)
+
+    assert len(states_to_copy_to) == len(states_to_copy_from), (len(states_to_copy_to), len(states_to_copy_from))
+    # dest_layer -> src_layer
+    layer_copy_dict = dict(zip(states_to_copy_to, states_to_copy_from))
+
+    embed_layername = layername_uskg(model, "encoder", 0, "embed")
+
+    def untuple(x):
+        return x[0] if isinstance(x, tuple) else x
+    
+    # Define the model-patching rule.
+    if isinstance(noise, float):
+        noise_fn = lambda x: noise * x
+    else:
+        noise_fn = noise
+
+    # Decide the corruption spec
+    corrupt_spec = defaultdict(list)
+    if states_to_corrupt is not None:
+        for t, l in states_to_corrupt:
+            corrupt_spec[l].append(t)
+    corrupt_spec_1st_pass = defaultdict(list)
+    if states_to_corrupt_1st_pass is not None:
+        for t, l in states_to_corrupt_1st_pass:
+            corrupt_spec_1st_pass[l].append(t)
+
+
+    # Define the model-patching rule for the 2nd (main) pass.
+    def patch_rep(x, layer):
+        if (layer not in copy_to_spec) and (layer not in corrupt_spec):
+            return x
+
+        h = untuple(x)
+        if layer in corrupt_spec:
+            toks_to_mix = corrupt_spec[layer]
+            if toks_to_mix:
+                mix_len = len(toks_to_mix)
+                noise_data = noise_fn(
+                    torch.from_numpy(prng(h.shape[0] - 1, mix_len, h.shape[2]))
+                ).to(device=h.device, dtype=h.dtype)
+
+                if replace:
+                    h[1:, toks_to_mix] = noise_data
+                else:
+                    h[1:, toks_to_mix] += noise_data
+
+        # If this layer is in the patch_spec, restore the uncorrupted hidden state
+        # for selected tokens.
+        # toks_to_patch = patch_spec.get(layer, [])
+        # toks_to_unpatch = unpatch_spec.get(layer, [])
+        toks_to_copy_to = copy_to_spec.get(layer, [])
+        # if toks_to_patch:
+        #     print(f'* 2nd pass, layer: {layer}, restoring: {toks_to_patch}')
+        # if toks_to_unpatch:
+        #     print(f'* 2nd pass, layer: {layer}, unpatching: {toks_to_unpatch}')
+
+        # for t in toks_to_patch:
+        #     h[1:, t] = h[0, t]
+        # for t in toks_to_unpatch:
+        #     h[1:, t] = untuple(first_pass_trace[layer].output)[1:, t]
+        for t in toks_to_copy_to:
+            src_t, src_layer = layer_copy_dict[(t, layer)]
+            h[1:, t] = untuple(first_pass_trace[src_layer].output)[1:, src_t]
+        
+        return x
+
+    # Define the model-patching rule for the 1st pass. (difference: no unpatch here)
+    def patch_rep_1st_pass(x, layer):
+        if (layer not in corrupt_spec_1st_pass):
+            return x
+
+        if layer in corrupt_spec_1st_pass:
+            toks_to_mix = corrupt_spec_1st_pass[layer]
+            if toks_to_mix:
+                mix_len = len(toks_to_mix)
+                noise_data = noise_fn(
+                    torch.from_numpy(prng(x.shape[0] - 1, mix_len, x.shape[2]))
+                ).to(device=x.device, dtype=x.dtype)
+
+                if replace:
+                    x[1:, toks_to_mix] = noise_data
+                else:
+                    x[1:, toks_to_mix] += noise_data
+
+        # If this layer is in the patch_spec, restore the uncorrupted hidden state
+        # for selected tokens.
+        # h = untuple(x)
+        # toks_to_patch = patch_spec_1st_pass.get(layer, [])
+        # if toks_to_patch:
+        #     print(f'* 1st pass, layer: {layer}, restoring: {toks_to_patch}')
+
+        # for t in toks_to_patch:
+        #     h[1:, t] = h[0, t]
+        return x
+
+
+    # With the patching rules defined, run the patched model in inference.
+    first_pass_outputs_exp = None
+    for first_pass in [True, False]:
+        with torch.no_grad(), nethook.TraceDict(
+            model,
+            list(corrupt_spec.keys()) + list(copy_from_spec.keys()) + list(copy_to_spec.keys()) + \
+                list(corrupt_spec_1st_pass.keys()),
+            edit_output=patch_rep_1st_pass if first_pass else patch_rep,
+        ) as td:
+            # outputs_exp = model(**inp)
+            outputs_exp = run_model_forward_uskg(model, **inp)
+            if first_pass:
+                first_pass_trace = td
+                first_pass_outputs_exp = outputs_exp
+
+    # Here we report softmax probabilities for the answer positions.
+    probs = torch.softmax(outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+    if return_first_pass_preds:
+        probs_pass1 = torch.softmax(first_pass_outputs_exp.logits[1:, -answer_len:, :], dim=-1).mean(dim=0)
+
+    if return_first_pass_preds:
+        return probs, probs_pass1
+    else:
+        return probs
+
+def trace_layer_copy_uskg_multi_token(**kwargs):
+    ## NOTE: untested!
+
+    run_kwargs = dict(kwargs)
+    run_kwargs['answer_len'] = len(kwargs['answers_t'])
+    del run_kwargs['answers_t']
+
+    if kwargs['return_first_pass_preds']:
+        vocab_probs, pass1_vocab_probs = run_attention_manip_uskg_multi_token(**run_kwargs)
+    else:
+        vocab_probs = run_attention_manip_uskg_multi_token(**run_kwargs)
+
+    all_ans_probs = []
+    # pass1_all_ans_probs = []
+
+    for i, _t in enumerate(kwargs['answers_t']):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        probs = vocab_probs[i, _t]
+        all_ans_probs.append(probs)
+
+        # if kwargs['return_first_pass_preds']:
+        #     probs_1 = pass1_vocab_probs[i, _t]
+        #     pass1_all_ans_probs.append(probs_1)
+
+    # if return_first_pass_preds:
+    #     return all_ans_probs, pass1_all_ans_probs
+    # else:
+    #     return all_ans_probs
+    probs = min(all_ans_probs)
+    return probs
+
+
+
 
 
 def build_enc_self_attention_mask(
@@ -832,8 +1032,20 @@ def build_dec_cross_attention_mask(
     all2p_mask[:, :, :, :prefix_len] = True
     att_mix_mask_dict['all->p'] = all2p_mask
 
+    # NEW: other toks (o), include the connector and final </s>
+    ans2o_mask = torch.zeros_like(all_mask)
+    ans2o_mask[:, :, -answer_len:, text_ed + prefix_len : struct_st + prefix_len] = True
+    ans2o_mask[:, :, -answer_len:, struct_ed + prefix_len:] = True
+    att_mix_mask_dict['ans->o'] = ans2o_mask
+    all2o_mask = torch.zeros_like(all_mask)
+    all2o_mask[:, :, :, text_ed + prefix_len : struct_st + prefix_len] = True
+    all2o_mask[:, :, :, struct_ed + prefix_len:] = True
+    att_mix_mask_dict['all->o'] = all2o_mask
+
+    att_mix_mask_dict['ans->t+o'] = ans2t_mask | ans2o_mask
+    att_mix_mask_dict['all->t+o'] = all2t_mask | all2o_mask
+
     if use_self_node:
-        # ADDED: regarding struct context
         # Notice that it's ok to have 1 list in indexing, but not ok to have 2
         # If there are 2 lists, it will become a "gather()" which treats the 2 lists in a zipped way
         ans2c_mask = torch.zeros_like(all_mask).bool()
