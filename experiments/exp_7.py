@@ -51,7 +51,7 @@ def trace_exp7_0_0(
     device='cuda',
 ):
     """
-    AAAA
+    AAA
     Exp7.0.0 (encoder-layer-skip-effect)
     Skip certain layers and check the effect
     """
@@ -196,16 +196,485 @@ def trace_exp7_0_0(
     return result
 
 
-def main_sdra_7_0_0_encoder_layer_skip_effect(args):
+def trace_exp7_0_1(
+    mt,
+    a_ex,                   # output from ctu.create_analysis_sample_dicts()
+    device='cuda',
+):
     """
-    Exp 7.0.0: Skip certain layers and check the effect
+    AAA
+    Exp7.0.1 (decoder-layer-skip-effect)
+    Skip certain layers and check the effect
+    """
+
+    part = 'decoder'
+
+    # expect_input_ranges = a_ex['expect_input_ranges']
+    # tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    text_tok_indices = list(range(*text_range))
+    struct_tok_indices = list(range(*struct_range))
+    # prefix_len = mt.model.preseqlen
+
+    self_ranges = a_ex['self_ranges']
+    struct_context_ranges = a_ex['context_ranges']
+    self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+    result = ctu.make_basic_result_dict(a_ex)
+
+    ## Check basic results
+    n_samples = 2       # layer copy doesn't have randomness 
+
+    inp = ctu.make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * n_samples,
+        [dec_prompt] * n_samples,
+        answer=expect,
+        device=device
+    )
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = result['base_score']
+    is_correct_pred = result['correct_prediction']
+
+    bs, enc_seq_len = inp['input_ids'].size()
+    bs, dec_seq_len = inp['decoder_input_ids'].size()
+
+    other_tok_indices = list(range(text_ed, struct_st)) + list(range(struct_ed, enc_seq_len))
+    
+
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    """ Low score of exp 7: section = all, layer = 0 to 23 """
+
+    N_layers = mt.num_enc_layers if part == 'encoder' else mt.num_dec_layers
+    sublayers = ['self_attn', 'mlp'] if part == 'encoder' else ['self_attn', 'cross_attn', 'mlp']
+
+    section_tok_indices_dict = {
+        'ans': list(range(dec_seq_len - len(answers_t), dec_seq_len)),
+        'all': list(range(dec_seq_len)),
+    }
+
+    layers_range_dict = {
+        'q1_layers': range(N_layers // 4),
+        'q2_layers': range(N_layers // 4, N_layers // 2),
+        'q3_layers': range(N_layers // 2, N_layers * 3 // 4),
+        'q4_layers': range(N_layers * 3 // 4, N_layers),
+        'low_layers': range(N_layers // 2),
+        'mid_layers': range(N_layers // 4, N_layers * 3 // 4),
+        'high_layers': range(N_layers // 2, N_layers),
+        'all_layers': range(N_layers),
+    }
+
+    # corrupted_vocab_probs: (answer_len, vocab_size)
+    corrupted_vocab_probs = ctu.run_repatch_uskg_multi_token(
+        model=mt.model,
+        inp=inp,
+        answer_len=len(answers_t),
+        states_to_patch=[],
+        states_to_unpatch=[],
+        states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                           for t in section_tok_indices_dict['all'] for l in range(N_layers) for sublayer in sublayers],
+        # mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
+        replace=True,
+    )
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
+
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+
+    result['is_good_sample'] = True
+    
+    """ Starting Exp7.0.1 """
+
+
+    result['trace_scores'] = dict()
+
+    for sect_k, sect_tok_indices in section_tok_indices_dict.items():
+        # TEMP: only run for newly added sections
+        # if not sect_k.endswith('o'):
+        #     continue
+        # END TEMP
+
+        result['trace_scores'][sect_k] = dict()
+
+        for layers_k, layers_range in layers_range_dict.items():
+            _score = ctu.trace_with_repatch_uskg(
+                model=mt.model,
+                inp=inp,
+                answers_t=answers_t,
+                states_to_patch=[],
+                states_to_unpatch=[],
+                states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                                for t in sect_tok_indices for l in layers_range for sublayer in sublayers],
+                replace=True,
+            ).item()
+            result['trace_scores'][sect_k][layers_k] = _score
+
+    return result
+
+
+def trace_exp7_0_2(
+    mt,
+    a_ex,                   # output from ctu.create_analysis_sample_dicts()
+    device='cuda',
+):
+    """
+    AAA
+    Exp7.0.2 (encoder-syntax-layer-skip-effect)
+    Skip certain layers and check the effect
+    """
+
+    part = 'encoder'
+
+    # expect_input_ranges = a_ex['expect_input_ranges']
+    # tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    text_tok_indices = list(range(*text_range))
+    struct_tok_indices = list(range(*struct_range))
+    # prefix_len = mt.model.preseqlen
+
+    # self_ranges = a_ex['self_ranges']
+    # struct_context_ranges = a_ex['context_ranges']
+    # self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    # struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+    result = ctu.make_basic_result_dict(a_ex)
+
+    ## Check basic results
+    n_samples = 2       # layer copy doesn't have randomness 
+
+    inp = ctu.make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * n_samples,
+        [dec_prompt] * n_samples,
+        answer=expect,
+        device=device
+    )
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = result['base_score']
+    is_correct_pred = result['correct_prediction']
+
+    bs, enc_seq_len = inp['input_ids'].size()
+    bs, dec_seq_len = inp['decoder_input_ids'].size()
+
+    other_tok_indices = list(range(text_ed, struct_st)) + list(range(struct_ed, enc_seq_len))
+    
+
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    """ Low score of exp 7: section = all, layer = 0 to 23 """
+
+    N_layers = mt.num_enc_layers if part == 'encoder' else mt.num_dec_layers
+    sublayers = ['self_attn', 'mlp'] if part == 'encoder' else ['self_attn', 'cross_attn', 'mlp']
+
+    section_tok_indices_dict = {
+        'text': text_tok_indices,
+        'struct': struct_tok_indices,
+        'other': other_tok_indices,
+        'text+other': text_tok_indices + other_tok_indices,
+        'all': list(range(enc_seq_len)),
+    }
+
+    layers_range_dict = {
+        'q1_layers': range(N_layers // 4),
+        'q2_layers': range(N_layers // 4, N_layers // 2),
+        'q3_layers': range(N_layers // 2, N_layers * 3 // 4),
+        'q4_layers': range(N_layers * 3 // 4, N_layers),
+        'low_layers': range(N_layers // 2),
+        'mid_layers': range(N_layers // 4, N_layers * 3 // 4),
+        'high_layers': range(N_layers // 2, N_layers),
+        'all_layers': range(N_layers),
+    }
+
+    # corrupted_vocab_probs: (answer_len, vocab_size)
+    corrupted_vocab_probs = ctu.run_repatch_uskg_multi_token(
+        model=mt.model,
+        inp=inp,
+        answer_len=len(answers_t),
+        states_to_patch=[],
+        states_to_unpatch=[],
+        states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                           for t in section_tok_indices_dict['all'] for l in range(N_layers) for sublayer in sublayers],
+        # mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
+        replace=True,
+    )
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
+
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+
+    result['is_good_sample'] = True
+    
+    """ Starting Exp7.0.2 """
+
+
+    result['trace_scores'] = dict()
+
+    for sect_k, sect_tok_indices in section_tok_indices_dict.items():
+        # TEMP: only run for newly added sections
+        # if not sect_k.endswith('o'):
+        #     continue
+        # END TEMP
+
+        result['trace_scores'][sect_k] = dict()
+
+        for layers_k, layers_range in layers_range_dict.items():
+            _score = ctu.trace_with_repatch_uskg(
+                model=mt.model,
+                inp=inp,
+                answers_t=answers_t,
+                states_to_patch=[],
+                states_to_unpatch=[],
+                states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                                for t in sect_tok_indices for l in layers_range for sublayer in sublayers],
+                replace=True,
+            ).item()
+            result['trace_scores'][sect_k][layers_k] = _score
+
+    return result
+
+
+def trace_exp7_0_3(
+    mt,
+    a_ex,                   # output from ctu.create_analysis_sample_dicts()
+    device='cuda',
+):
+    """
+    AAA
+    Exp7.0.3 (decoder-syntax-layer-skip-effect)
+    Skip certain layers and check the effect
+    """
+
+    part = 'decoder'
+
+    # expect_input_ranges = a_ex['expect_input_ranges']
+    # tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    text_tok_indices = list(range(*text_range))
+    struct_tok_indices = list(range(*struct_range))
+    # prefix_len = mt.model.preseqlen
+
+    # self_ranges = a_ex['self_ranges']
+    # struct_context_ranges = a_ex['context_ranges']
+    # self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    # struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+    result = ctu.make_basic_result_dict(a_ex)
+
+    ## Check basic results
+    n_samples = 2       # layer copy doesn't have randomness 
+
+    inp = ctu.make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * n_samples,
+        [dec_prompt] * n_samples,
+        answer=expect,
+        device=device
+    )
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = result['base_score']
+    is_correct_pred = result['correct_prediction']
+
+    bs, enc_seq_len = inp['input_ids'].size()
+    bs, dec_seq_len = inp['decoder_input_ids'].size()
+
+    other_tok_indices = list(range(text_ed, struct_st)) + list(range(struct_ed, enc_seq_len))
+    
+
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    """ Low score of exp 7: section = all, layer = 0 to 23 """
+
+    N_layers = mt.num_enc_layers if part == 'encoder' else mt.num_dec_layers
+    sublayers = ['self_attn', 'mlp'] if part == 'encoder' else ['self_attn', 'cross_attn', 'mlp']
+
+    section_tok_indices_dict = {
+        'ans': list(range(dec_seq_len - len(answers_t), dec_seq_len)),
+        'all': list(range(dec_seq_len)),
+    }
+
+    layers_range_dict = {
+        'q1_layers': range(N_layers // 4),
+        'q2_layers': range(N_layers // 4, N_layers // 2),
+        'q3_layers': range(N_layers // 2, N_layers * 3 // 4),
+        'q4_layers': range(N_layers * 3 // 4, N_layers),
+        'low_layers': range(N_layers // 2),
+        'mid_layers': range(N_layers // 4, N_layers * 3 // 4),
+        'high_layers': range(N_layers // 2, N_layers),
+        'all_layers': range(N_layers),
+    }
+
+    # corrupted_vocab_probs: (answer_len, vocab_size)
+    corrupted_vocab_probs = ctu.run_repatch_uskg_multi_token(
+        model=mt.model,
+        inp=inp,
+        answer_len=len(answers_t),
+        states_to_patch=[],
+        states_to_unpatch=[],
+        states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                           for t in section_tok_indices_dict['all'] for l in range(N_layers) for sublayer in sublayers],
+        # mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
+        replace=True,
+    )
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
+
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+
+    result['is_good_sample'] = True
+    
+    """ Starting Exp7.0.3 """
+
+
+    result['trace_scores'] = dict()
+
+    for sect_k, sect_tok_indices in section_tok_indices_dict.items():
+        # TEMP: only run for newly added sections
+        # if not sect_k.endswith('o'):
+        #     continue
+        # END TEMP
+
+        result['trace_scores'][sect_k] = dict()
+
+        for layers_k, layers_range in layers_range_dict.items():
+            _score = ctu.trace_with_repatch_uskg(
+                model=mt.model,
+                inp=inp,
+                answers_t=answers_t,
+                states_to_patch=[],
+                states_to_unpatch=[],
+                states_to_corrupt=[(t, ctu.layername_uskg(mt.model, part, l, sublayer))
+                                for t in sect_tok_indices for l in layers_range for sublayer in sublayers],
+                replace=True,
+            ).item()
+            result['trace_scores'][sect_k][layers_k] = _score
+
+    return result
+
+
+
+
+Exp7_0_funcs = {
+    '7.0.0': trace_exp7_0_0,
+    '7.0.1': trace_exp7_0_1,
+    '7.0.2': trace_exp7_0_2,
+    '7.0.3': trace_exp7_0_3,
+}
+
+Exp7_0_result_save_dir_names = {
+    '7.0.0': 'exp7_0_0_encoder_layer_skip_effect',
+    '7.0.1': 'exp7_0_1_decoder_layer_skip_effect',
+    '7.0.2': 'exp7_0_2_encoder_syntax_layer_skip_effect',
+    '7.0.3': 'exp7_0_3_decoder_syntax_layer_skip_effect',
+}
+
+Exp7_0_is_on_syntax = {
+    '7.0.0': False,
+    '7.0.1': False,
+    '7.0.2': True,
+    '7.0.3': True,
+}
+
+def main_sdra_7_0_layer_skip_effect(args):
+    """
+    Exp 7.0.*: Skip certain layers and check the effect
     """
     spider_dataset_path = args.spider_dataset_path
     spider_db_dir = args.spider_db_dir
     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=7.0.0_{args.ds}_{args.subject_type}'
-    result_save_dir = os.path.join(args.result_dir, 'exp7_0_0_encoder_layer_skip_effect')
+    # exp_name = f'exp=7.0.0_{args.ds}_{args.subject_type}'
+    # result_save_dir = os.path.join(args.result_dir, 'exp7_0_0_encoder_layer_skip_effect')
+
+    exp_name =  f'exp={args.exp_id}_{args.ds}' if args.is_on_syntax else f'exp={args.exp_id}_{args.ds}_{args.subject_type}'
+    # exp_name += '-tmp'
+
+    result_save_dir = args.result_save_dir
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
 
@@ -226,9 +695,12 @@ def main_sdra_7_0_0_encoder_layer_skip_effect(args):
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
         ex = processed_spider_dataset[ex_id]
 
-        analysis_samples = ctu.create_analysis_sample_dicts(
-            mt_uskg, ex, args.subject_type,
-            remove_struct_duplicate_nodes=True)
+        if args.is_on_syntax:
+            analysis_samples = ctu.create_syntax_analysis_sample_dicts(mt_uskg, ex)
+        else:
+            analysis_samples = ctu.create_analysis_sample_dicts(
+                mt_uskg, ex, args.subject_type,
+                remove_struct_duplicate_nodes=True)
 
         ex_out_dict = {'ex_id': ex_id}
         
@@ -251,7 +723,8 @@ def main_sdra_7_0_0_encoder_layer_skip_effect(args):
 
             a_ex = ctu.add_clean_prediction(mt_uskg, a_ex)
             
-            result = trace_exp7_0_0(
+            exp_func = Exp7_0_funcs[args.exp_id]
+            result = exp_func(
                 mt_uskg,
                 a_ex,
             )
@@ -286,16 +759,31 @@ def main():
 
     args.result_dir = '/home/yshao/Projects/rome/results'
 
+    # Modify this
+    args.exp_id = '7.0.3'
+    # END
+
+    args.result_save_dir = os.path.join(args.result_dir, Exp7_0_result_save_dir_names[args.exp_id])
+    args.is_on_syntax = Exp7_0_is_on_syntax[args.exp_id]
+    if args.is_on_syntax:
+        subject_type_list = ['non_node']
+    else:
+        subject_type_list = ['column', 'table', 'table_alias']
+
     ctu.evaluate_hardness.evaluator = ctu.load_evaluator(args)
 
-    args.subject_type = 'column'
-    main_sdra_7_0_0_encoder_layer_skip_effect(args)
+    # args.subject_type = 'column'
+    # main_sdra_7_0_layer_skip_effect(args)
 
-    args.subject_type = 'table'
-    main_sdra_7_0_0_encoder_layer_skip_effect(args)
+    # args.subject_type = 'table'
+    # main_sdra_7_0_layer_skip_effect(args)
 
-    args.subject_type = 'table_alias'
-    main_sdra_7_0_0_encoder_layer_skip_effect(args)
+    # args.subject_type = 'table_alias'
+    # main_sdra_7_0_layer_skip_effect(args)
+
+    for subj in subject_type_list:
+        args.subject_type = subj
+        main_sdra_7_0_layer_skip_effect(args)
 
 
 if __name__ == "__main__":
