@@ -1948,6 +1948,140 @@ def trace_exp2_text_struct(
     return result
 
 
+
+def trace_exp2_3(
+    mt,
+    a_ex,
+    noise=0.1,
+    replace=True,
+    device='cuda',
+):
+    """
+    AAAA
+    Exp2.3: section corrupt effect
+    a_ex (Dict): analysis_sample (a_ex) with `add_clean_prediction()`
+    """
+
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+    text_st, text_ed = text_range
+    struct_st, struct_ed = struct_range
+    text_tok_indices = list(range(*text_range))
+    struct_tok_indices = list(range(*struct_range))
+    # prefix_len = mt.model.preseqlen
+
+    self_ranges = a_ex['self_ranges']
+    struct_context_ranges = a_ex['context_ranges']
+    self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+
+    result = make_basic_result_dict(a_ex)
+
+    ## Check basic results
+    n_samples = 2 if noise == 0.0 else 11       # zero-corruption doesn't have randomness
+
+    inp = make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * n_samples,
+        [dec_prompt] * n_samples,
+        answer=expect,
+        device=device
+    )
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = result['base_score']
+    is_correct_pred = result['correct_prediction']
+
+    bs, enc_seq_len = inp['input_ids'].size()
+    bs, dec_seq_len = inp['decoder_input_ids'].size()
+
+    other_tok_indices = list(range(text_ed, struct_st)) + list(range(struct_ed, enc_seq_len))
+    
+
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    base_score = result['base_score']
+
+    section_tok_indices_dict = {
+        'text': text_tok_indices,
+        'struct': struct_tok_indices,
+        'self': self_tok_indices,
+        'struct_context': struct_context_tok_indices,
+        'other': other_tok_indices,
+        'text+other': text_tok_indices + other_tok_indices,
+        'all': list(range(enc_seq_len)),
+    }
+
+    layer_names_dict = {
+        'embed': layername_uskg(mt.model, 'encoder', 0, 'embed'),
+        'final_enc': layername_uskg(mt.model, 'encoder', mt.num_enc_layers - 1),
+    }
+
+    # low score: corrupting all section embeddings
+    corrupted_vocab_probs = run_repatch_uskg_multi_token(
+        model=mt.model,
+        inp=inp,
+        # answers_t=answers_t,
+        answer_len=len(answers_t),
+        states_to_patch=[],
+        states_to_unpatch=[],
+        states_to_corrupt=[(t, layer_names_dict['embed']) for t in section_tok_indices_dict['all']],
+        noise=noise,
+        replace=replace,
+    )
+
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
+
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+
+    result['is_good_sample'] = True
+    
+    """ Starting Exp2.3 """
+    # sect_k -> layer_k -> score
+    result['trace_scores'] = defaultdict(dict)
+
+    for sect_k, sect_tok_indices in section_tok_indices_dict.items():
+        for layer_k, layer_name in layer_names_dict.items():
+            result['trace_scores'][sect_k][layer_k] = trace_with_repatch_uskg(
+                model=mt.model,
+                inp=inp,
+                states_to_patch=[],
+                states_to_unpatch=[],
+                answers_t=answers_t,
+                states_to_corrupt=[(t, layer_name) for t in sect_tok_indices],
+                noise=noise,
+                replace=True,
+            ).item()
+
+    return result
+
+
+
 def trace_exp3_1_struct_context_restore(
     mt,
     a_ex,                   # analysis_sample (a_ex) with `add_clean_prediction()`
@@ -2788,6 +2922,8 @@ def create_analysis_sample_dicts(
         #     result['table'] = node
         # result['db_id'] = ex['db_id']
         # result['expect_input_indices'] = enc_token_range
+    
+    analysis_ex_dicts.sort(key=lambda d: d['dec_prompt'])
     return analysis_ex_dicts
 
 
@@ -3252,6 +3388,99 @@ def main_sdra_2_2_dirty_text_struct_restore(args):
             f.write(json.dumps(dump_dict, indent=None) + '\n')
 
 
+def main_sdra_2_3_section_corruption_effect(args):
+    """
+    Exp 2.3: section corruption effect
+    """
+    spider_dataset_path = args.spider_dataset_path
+    spider_db_dir = args.spider_db_dir
+    data_cache_dir = args.data_cache_dir
+
+    # args.exp_id = "2.3"
+    exp_config = EXP_CONFIGS[args.exp_id]
+    args.replace = exp_config['replace']
+    args.noise = exp_config['noise']
+    args.is_on_syntax = (args.subject_type == 'non_node')
+
+    exp_name =  f'exp={args.exp_id}_{args.ds}' if args.is_on_syntax else f'exp={args.exp_id}_{args.ds}_{args.subject_type}'
+    exp_name += f'-replace={args.replace}-noise={args.noise}'
+    if args.is_tmp:
+        exp_name += '-tmp'
+
+    result_save_dir = args.result_save_dir
+    os.makedirs(result_save_dir, exist_ok=True)
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+
+    mt_uskg = ModelAndTokenizer_USKG('t5-large-prefix')
+
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
+    n_ex = len(processed_spider_dataset)
+
+    total_samples = 0
+    n_good_samples = 0
+
+    f = open(result_save_path, 'w')
+    start_id = 0
+    end_id = n_ex
+    # end_id = 10
+    stride = 111 if args.is_tmp else 1
+    # with open(result_save_path, 'w') as f:
+    for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
+        ex = processed_spider_dataset[ex_id]
+
+        if args.is_on_syntax:
+            raise NotImplementedError
+            # analysis_samples = create_syntax_analysis_sample_dicts(mt_uskg, ex)
+        else:
+            analysis_samples = create_analysis_sample_dicts(
+                mt_uskg, ex, args.subject_type,
+                remove_struct_duplicate_nodes=True)
+
+        ex_out_dict = {'ex_id': ex_id}
+        
+        input_too_long = False
+        if len(analysis_samples) > 0:
+            # enc_sentence = analysis_samples[0]['enc_sentence']
+            # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
+            enc_tokenized = analysis_samples[0]['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+            
+            if input_len > 500:
+                # ex_out_dict['trace_results'] = []
+                ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+                input_too_long = True
+
+        ex_results = []
+        for a_ex in analysis_samples:
+            if input_too_long:
+                continue
+
+            a_ex = add_clean_prediction(mt_uskg, a_ex)
+            
+            # exp_func = trace_exp2_3
+            result = trace_exp2_3(
+                mt_uskg,
+                a_ex,
+                replace=args.replace,
+                noise=args.noise,
+            )
+
+            ex_results.append(result)
+
+            total_samples += 1
+            if result['correct_prediction']:
+                n_good_samples += 1
+
+        # ex_out_dict = {
+        #     'ex_id': ex_id,
+        #     'trace_results': ex_results,
+        # }
+        ex_out_dict['trace_results'] = ex_results
+        f.write(json.dumps(ex_out_dict, indent=None) + '\n')
+    f.close()
+
+
+
 def main_sdra_3_0_node_corrupt_effect(args):
     """
     Exp 3.0: Corrupt each node, see if it has effect on prediction
@@ -3427,7 +3656,6 @@ def main_sdra_3_1_dirty_struct_context_restore(args):
     print(f'TODO')
 
 
-
 def main_sdra_3_2_dirty_struct_context_compare(args):
     """
     AAA
@@ -3512,10 +3740,38 @@ def main_sdra_3_2_dirty_struct_context_compare(args):
 
 
 
+EXP_CONFIGS = {
+    '2.3.0': {
+        'replace': True,
+        'noise': 0.1,
+    },
+    '2.3.1': {
+        'replace': True,
+        'noise': 0.0,
+    },
+    # '2.3.2': {
+    #     'replace': False,
+    #     'noise': 0.1,
+    # },
+}
+
+
 def main():
-    args = Namespace()
+    # Create the ArgumentParser object
+    parser = argparse.ArgumentParser()
+
+    # Add different types of arguments
+    parser.add_argument('-e', '--exp_id', required=True, help='Experiment ID')
+    parser.add_argument('-t', '--is_tmp', action='store_true', help='Do a temp debug run')
+    # parser.add_argument('-d', '--arg4', choices=['option1', 'option2', 'option3'], help='An argument with limited choices')
+    # parser.add_argument('-e', '--arg5', nargs='+', help='An argument with multiple values')
+
+    # Parse the command-line arguments
+    args = parser.parse_args()
+
+    # args = Namespace()
     args.ds = 'dev'                     # train, dev
-    args.subject_type = 'column'         # table, table_alias, column, (value)
+    # args.subject_type = 'column'         # table, table_alias, column, (value)
     args.part = 'encoder'               # encoder, decoder, both
     args.spider_dataset_path = f'/home/yshao/Projects/SDR-analysis/data/spider/{args.ds}+ratsql_graph.json'
     args.spider_db_dir = '/home/yshao/Projects/language/language/xsp/data/spider/database'
@@ -3526,10 +3782,18 @@ def main():
 
     evaluate_hardness.evaluator = load_evaluator(args)
 
-    main_sdra_3_2_dirty_struct_context_compare(args)
+    # args.is_tmp = False
+
+    args.result_save_dir = os.path.join(args.result_dir, "exp2.3_section_corruption_effect")
+
+    args.subject_type = 'column'
+    main_sdra_2_3_section_corruption_effect(args)
+
+    args.subject_type = 'table'
+    main_sdra_2_3_section_corruption_effect(args)
 
     args.subject_type = 'table_alias'
-    main_sdra_3_2_dirty_struct_context_compare(args)
+    main_sdra_2_3_section_corruption_effect(args)
 
 
 if __name__ == "__main__":
