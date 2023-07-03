@@ -936,8 +936,7 @@ def trace_exp5_5(
             [(ctu.layername_uskg(mt.model, 'encoder', l, 'self_attn'), enc_att_mix_mask_dict['all']) for l in range(N_enc_layers)] + \
             [(ctu.layername_uskg(mt.model, 'decoder', l, 'cross_attn'), dec_att_mix_mask_dict['all']) for l in range(N_dec_layers)]
         ),
-        replace=True,
-        # TODO: attn_corrupt_type
+        attn_corrupt_type=attn_corrupt_type,
     )
     corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
     corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
@@ -1012,8 +1011,7 @@ def trace_exp5_5(
                     [(ctu.layername_uskg(mt.model, 'encoder', l, 'self_attn'), enc_mix_mask) for l in enc_layers] + \
                     [(ctu.layername_uskg(mt.model, 'decoder', l, 'cross_attn'), dec_mix_mask) for l in dec_layers]
                 ),
-                replace=True,
-                # TODO: attn_corrupt_type
+                attn_corrupt_type=attn_corrupt_type,
             ).item()
             result['trace_scores'][sect_k][layer_k] = _score
 
@@ -1454,6 +1452,24 @@ def main_sdra_5_5_both_part_attention_removal(args):
 
 
 EXP_5_CONFIGS = {
+    ## Exp 5.3
+    '5.3': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+    },
+    '5.3.1': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+    },
+    '5.3.2': {
+        'attn_corrupt_type': 'logits',  # with re-normalization
+    },
+    ## Exp 5.4
+    '5.4': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+    },
+    '5.4.1': {
+        'attn_corrupt_type': 'logits',  # with re-normalization
+    },
+    ## Exp 5.5
     '5.5': {
         'attn_corrupt_type': 'weights',  # no re-normalization
     },

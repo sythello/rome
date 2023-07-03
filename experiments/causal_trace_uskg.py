@@ -500,6 +500,7 @@ def run_attention_manip_uskg_multi_token(
     mix_mask_per_layer=None,    # Dict[str, List|ndarray]: Full control of mixing, key = layer_name, value 1 = mix, 0 = keep 
     # noise=0.1,  # Level of noise to add
     # uniform_noise=False,
+    attn_corrupt_type='weights',    # 'weights', 'logits'
     replace=True,  # True to replace with instead of add noise; TODO
 ):
     """
@@ -525,23 +526,37 @@ def run_attention_manip_uskg_multi_token(
     #         def _forward_hook_fn(m, inp, outp):
     #             m.ext_attention_weights_fn = None
 
-    for layer, mix_mask in mix_mask_per_layer.items():
-        def _func_factory(mix_mask):
-            def _attn_w_fn(attn):
-                _mix_mask = mix_mask.to(device=attn.device)
-                _zero = torch.tensor(0, dtype=attn.dtype, device=attn.device)
-                attn[1:] = torch.where(_mix_mask, _zero, attn[1:])     # keep batch_idx=0 clean!
-                return attn
-            
-            def _pre_forward_hook_fn(m, inp):
-                m.ext_attention_weights_fn = _attn_w_fn
 
-            def _forward_hook_fn(m, inp, outp):
-                m.ext_attention_weights_fn = None
+    def _func_factory(mix_mask, attn_corrupt_type):
+        def _attn_w_fn(attn):
+            _mix_mask = mix_mask.to(device=attn.device)
+            _zero = torch.tensor(0, dtype=attn.dtype, device=attn.device)
+            attn[1:] = torch.where(_mix_mask, _zero, attn[1:])     # keep batch_idx=0 clean!
+            return attn
         
-            return _pre_forward_hook_fn, _forward_hook_fn
-        
-        p_hook_fn, f_hook_fn = _func_factory(mix_mask)
+        def _attn_lg_fn(attn):
+            _mix_mask = mix_mask.to(device=attn.device)
+            _neg = torch.tensor(-1e9, dtype=attn.dtype, device=attn.device)
+            attn[1:] = torch.where(_mix_mask, _neg, attn[1:])     # keep batch_idx=0 clean!
+            return attn
+
+        def _pre_forward_hook_fn(m, inp):
+            if attn_corrupt_type == 'weights':
+                m.ext_attention_weights_fn = _attn_w_fn
+            elif attn_corrupt_type == 'logits':
+                m.ext_attention_logits_fn = _attn_lg_fn
+            else:
+                raise ValueError(attn_corrupt_type)
+
+        def _forward_hook_fn(m, inp, outp):
+            m.ext_attention_weights_fn = None
+            m.ext_attention_logits_fn = None
+    
+        return _pre_forward_hook_fn, _forward_hook_fn
+
+
+    for layer, mix_mask in mix_mask_per_layer.items():
+        p_hook_fn, f_hook_fn = _func_factory(mix_mask, attn_corrupt_type)
         m = nethook.get_module(model, layer)
         # print(m)
         p_hook = m.register_forward_pre_hook(p_hook_fn)
@@ -578,6 +593,7 @@ def trace_attention_manip_uskg_multi_token(
     # noise=0.1,  # Level of noise to add
     # uniform_noise=False,
     replace=True,  # True to replace with instead of add noise
+    attn_corrupt_type='weights',    # 'weights', 'logits'
     # trace_layers=None,  # List of traced outputs to return (not implemented in original code)
     # return_first_pass_preds=False,      # If True, also return the prediction probs of first run (to reduce repetitive computations)
 ):
@@ -609,6 +625,7 @@ def trace_attention_manip_uskg_multi_token(
         # tgt_tokens_to_mix=tgt_tokens_to_mix,
         mix_mask_per_layer=mix_mask_per_layer,
         replace=replace,
+        attn_corrupt_type=attn_corrupt_type,
     )
 
     # We report softmax probabilities for the answers_t token predictions of interest.
