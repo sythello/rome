@@ -809,6 +809,32 @@ def main_sdra_6_2_decoder_cross_attention_corruption_syntax(args):
     f.close()
 
 
+EXP_6_CONFIGS = {
+    ## Exp 6.1
+    '6.1': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp6_1_attention_corruption_effect_syntax',
+        'trace_exp_func_id': '6.1',
+    },
+    '6.1.1': {
+        'attn_corrupt_type': 'logits',  # with re-normalization
+        'result_save_dir_name': 'exp6_1_attention_corruption_effect_syntax',
+        'trace_exp_func_id': '6.1',
+    },
+    ## Exp 6.2
+    '6.2': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp6_2_decoder_cross_attention_corruption_syntax',
+        'trace_exp_func_id': '6.2',
+    },
+    '6.2.1': {
+        'attn_corrupt_type': 'logits',  # with re-normalization
+        'result_save_dir_name': 'exp6_2_decoder_cross_attention_corruption_syntax',
+        'trace_exp_func_id': '6.2',
+    },
+}
+
+
 def main():
     args = Namespace()
     args.ds = 'dev'                     # train, dev

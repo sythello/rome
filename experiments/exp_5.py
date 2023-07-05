@@ -25,6 +25,7 @@ from rome.tok_dataset import (
     length_collation,
 )
 from util import nethook
+from util import func_register as f_reg
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from experiments import causal_trace_uskg as ctu
@@ -44,7 +45,7 @@ from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
 from uskg.third_party.spider import evaluation as sp_eval
 
 
-
+# f_reg.register('trace_exp', '5.0')
 def trace_exp5_0_dirty_attention_vector_effect(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
@@ -57,6 +58,7 @@ def trace_exp5_0_dirty_attention_vector_effect(
     """
     AAA
     Exp5 (dirty attention vector effect)
+    TODO: update definition, add `attn_corrupt_type`
     """
 
     expect_input_ranges = a_ex['expect_input_ranges']
@@ -211,7 +213,7 @@ def trace_exp5_0_dirty_attention_vector_effect(
     return result
 
 
-
+# f_reg.register('trace_exp', '5.2')
 def trace_exp5_2_attention_section_removal_effect(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
@@ -225,6 +227,7 @@ def trace_exp5_2_attention_section_removal_effect(
     AAA
     Exp5.2 (attention-section-removal-effect)
     Check the effect of disabling self-node's attention to certain sections (prefix, text, struct)
+    TODO: update definition, add `attn_corrupt_type`
     """
 
     assert not (part == 'decoder' and attn_type == 'self_attn'), 'Decoder self-attn not implemented'
@@ -391,14 +394,15 @@ def trace_exp5_2_attention_section_removal_effect(
     return result
 
 
-
+@f_reg.register('trace_exp', '5.3')
 def trace_exp5_3_attention_section_mutual_removal(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
-    part='encoder',         # 'encoder', 'decoder'
-    attn_type='self_attn',  # 'self_attn', 'cross_attn'
+    # part='encoder',         # 'encoder', 'decoder'
+    # attn_type='self_attn',  # 'self_attn', 'cross_attn'
     corrupt_type='zero',    # 'zero', 'replace', 'add'
-    window=10,              # the window size to try to corrupt
+    attn_corrupt_type='weights',    # 'weights', 'logits'
+    # window=10,              # the window size to try to corrupt
     device='cuda',
 ):
     """
@@ -407,7 +411,9 @@ def trace_exp5_3_attention_section_mutual_removal(
     Check the effect of disabling attention between certain sections (prefix, text, struct)
     """
 
-    assert (part == 'encoder' and attn_type == 'self_attn'), 'Only Eecoder self-attn implemented'
+    # assert (part == 'encoder' and attn_type == 'self_attn'), 'Only Eecoder self-attn implemented'
+    part = 'encoder'
+    attn_type = 'self_attn'
 
     expect_input_ranges = a_ex['expect_input_ranges']
     tok_indices = [i for s, e in expect_input_ranges for i in range(s, e)]
@@ -493,80 +499,29 @@ def trace_exp5_3_attention_section_mutual_removal(
         use_self_node=True
     )
 
-    # text_st, text_ed = text_range
-    # struct_st, struct_ed = struct_range
-    
-    # att_mix_mask_dict = dict()
-    # # mix_mask: (batch, head, src_len, tgt_len)
-    
-    # t2s_mask = torch.zeros(1, 1, seq_len, seq_len + prefix_len).bool()
-    # t2s_mask[:, :, text_st : text_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
-    # att_mix_mask_dict['t->s'] = t2s_mask
-
-    # s2t_mask = torch.zeros_like(t2s_mask).bool()
-    # s2t_mask[:, :, struct_st : struct_ed, text_st + prefix_len : text_ed + prefix_len] = True
-    # att_mix_mask_dict['s->t'] = s2t_mask
-
-    # att_mix_mask_dict['t<->s'] = t2s_mask | s2t_mask
-
-    # t2p_mask = torch.zeros_like(t2s_mask).bool()
-    # t2p_mask[:, :, text_st : text_ed, :prefix_len] = True
-    # att_mix_mask_dict['t->p'] = t2p_mask
-
-    # s2p_mask = torch.zeros_like(t2s_mask).bool()
-    # s2p_mask[:, :, struct_st : struct_ed, :prefix_len] = True
-    # att_mix_mask_dict['s->p'] = s2p_mask
-
-    # att_mix_mask_dict['ts->p'] = t2p_mask | s2p_mask
-
-    # # ADDED: section self-attention
-    # t2t_mask = torch.zeros_like(t2s_mask).bool()
-    # t2t_mask[:, :, text_st : text_ed, text_st + prefix_len : text_ed + prefix_len] = True
-    # att_mix_mask_dict['t->t'] = t2t_mask
-
-    # s2s_mask = torch.zeros_like(t2s_mask).bool()
-    # s2s_mask[:, :, struct_st : struct_ed, struct_st + prefix_len : struct_ed + prefix_len] = True
-    # att_mix_mask_dict['s->s'] = s2s_mask
-
-    # # ADDED: regarding struct context
-    # # Notice that it's ok to have 1 list in indexing, but not ok to have 2
-    # # If there are 2 lists, it will become a "gather()" which treats the 2 lists in a zipped way
-    # s2c_mask = torch.zeros_like(t2s_mask).bool()
-    # s2c_mask[:, :, struct_st : struct_ed, struct_context_tok_indices_tgt_side] = True
-    # att_mix_mask_dict['s->c'] = s2c_mask
-
-    # c2p_mask = torch.zeros_like(t2s_mask).bool()
-    # c2p_mask[:, :, struct_context_tok_indices, :prefix_len] = True
-    # att_mix_mask_dict['c->p'] = c2p_mask
-
-    # # c2t: skipped, as already see even s2t is not so effective
-
-    # c2s_mask = torch.zeros_like(t2s_mask).bool()
-    # c2s_mask[:, :, struct_context_tok_indices, struct_st + prefix_len : struct_ed + prefix_len] = True
-    # att_mix_mask_dict['c->s'] = c2s_mask
-
-    # c2c_mask = c2s_mask.clone()
-    # c2c_mask[:, :, :, self_tok_indices_tgt_side] = False
-    # assert c2c_mask.sum().item() == len(struct_context_tok_indices) ** 2, \
-    #     (c2c_mask.sum().item(), len(struct_context_tok_indices) ** 2)
-    # att_mix_mask_dict['c->c'] = c2c_mask
-
-    # # att_mix_mask_dict['all'] = att_mix_mask_dict['t<->s'] | att_mix_mask_dict['ts->p']
-    # att_mix_mask_dict['all'] = torch.ones_like(t2s_mask).bool()
-
-    # breakpoint()
-
-    low_score = result['low_score'] = ctu.trace_attention_manip_uskg_multi_token(
+    # corrupted_vocab_probs: (answer_len, vocab_size)
+    corrupted_vocab_probs = ctu.run_attention_manip_uskg_multi_token(
         model=mt.model,
         inp=inp,
-        answers_t=answers_t,
+        answer_len=len(answers_t),
         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
-        # layers_to_mix=[ctu.layername_uskg(mt.model, part, l, attn_type) for l in range(N_layers)],
-        # src_tokens_to_mix=self_tok_indices,
-        # tgt_tokens_to_mix=att_tgt_sections_dict['all'],
-        # noise=noise,
-        # replace=replace,
-    ).item()
+        attn_corrupt_type=attn_corrupt_type,
+    )
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
 
     ## If base and low score has no diff, "too easy", skip
     if base_score - low_score < 0.5:
@@ -580,9 +535,12 @@ def trace_exp5_3_attention_section_mutual_removal(
     result['trace_scores'] = dict()
     for mix_k in att_mix_mask_dict.keys():
         result['trace_scores'][mix_k] = {
-            'window': dict(),           # this & neighbor (-5 to +5) layers attention vector corrupt
-            'first_layer': None,
-            'last_layer': None,
+            # 'window': dict(),           # this & neighbor (-5 to +5) layers attention vector corrupt
+            # 'first_layer': None,
+            # 'last_layer': None,
+            # 'all_layers': None,
+            'low_layers': None,     # 0 - 11
+            'high_layers': None,    # 12 - 23
             'all_layers': None,
         }
 
@@ -593,57 +551,85 @@ def trace_exp5_3_attention_section_mutual_removal(
         #     continue
         # END TEMP
 
-        # window (for speed, only compute on a subset of layers)
-        # for layer_id in range(N_layers):
-        for layer_id in range(3, N_layers, 4):
-            _score = ctu.trace_attention_manip_uskg_multi_token(
-                model=mt.model,
-                inp=inp,
-                answers_t=answers_t,
-                mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask
-                               for l in range(
-                                    max(0, layer_id - window // 2),
-                                    min(N_layers, layer_id + window // 2)
-                                )},
-            ).item()
-            result['trace_scores'][mix_k]['window'][layer_id] = _score
+        # # window (for speed, only compute on a subset of layers)
+        # # for layer_id in range(N_layers):
+        # for layer_id in range(3, N_layers, 4):
+        #     _score = ctu.trace_attention_manip_uskg_multi_token(
+        #         model=mt.model,
+        #         inp=inp,
+        #         answers_t=answers_t,
+        #         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask
+        #                        for l in range(
+        #                             max(0, layer_id - window // 2),
+        #                             min(N_layers, layer_id + window // 2)
+        #                         )},
+        #     ).item()
+        #     result['trace_scores'][mix_k]['window'][layer_id] = _score
         
-        # single layer 
-        _score = ctu.trace_attention_manip_uskg_multi_token(
-            model=mt.model,
-            inp=inp,
-            answers_t=answers_t,
-            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, 0, attn_type) : mix_mask},
-        ).item()
-        result['trace_scores'][mix_k]['first_layer'] = _score
+        # # single layer 
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, 0, attn_type) : mix_mask},
+        # ).item()
+        # result['trace_scores'][mix_k]['first_layer'] = _score
+
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, N_layers - 1, attn_type) : mix_mask},
+        # ).item()
+        # result['trace_scores'][mix_k]['last_layer'] = _score
+
+        # # all layers 
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
+        # ).item()
+        # result['trace_scores'][mix_k]['all_layers'] = _score
 
         _score = ctu.trace_attention_manip_uskg_multi_token(
             model=mt.model,
             inp=inp,
             answers_t=answers_t,
-            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, N_layers - 1, attn_type) : mix_mask},
+            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
-        result['trace_scores'][mix_k]['last_layer'] = _score
+        result['trace_scores'][mix_k]['low_layers'] = _score
 
-        # all layers 
+        _score = ctu.trace_attention_manip_uskg_multi_token(
+            model=mt.model,
+            inp=inp,
+            answers_t=answers_t,
+            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2, N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
+        ).item()
+        result['trace_scores'][mix_k]['high_layers'] = _score
+
         _score = ctu.trace_attention_manip_uskg_multi_token(
             model=mt.model,
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['all_layers'] = _score
 
     return result
 
 
-
+@f_reg.register('trace_exp', '5.4')
 def trace_exp5_4_decoder_cross_attention_removal(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
     # part='decoder',         # 'encoder', 'decoder'
     # attn_type='cross_attn',  # 'self_attn', 'cross_attn'
     corrupt_type='zero',    # 'zero', 'replace', 'add'
+    attn_corrupt_type='weights',    # 'weights', 'logits'
     # window=10,              # the window size to try to corrupt
     device='cuda',
 ):
@@ -748,7 +734,7 @@ def trace_exp5_4_decoder_cross_attention_removal(
         inp=inp,
         answer_len=len(answers_t),
         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
-        replace=True,
+        attn_corrupt_type=attn_corrupt_type,
     )
     corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
     corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
@@ -795,6 +781,7 @@ def trace_exp5_4_decoder_cross_attention_removal(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['low_layers'] = _score
 
@@ -803,6 +790,7 @@ def trace_exp5_4_decoder_cross_attention_removal(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2, N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['high_layers'] = _score
 
@@ -811,13 +799,14 @@ def trace_exp5_4_decoder_cross_attention_removal(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['all_layers'] = _score
 
     return result
 
 
-
+@f_reg.register('trace_exp', '5.5')
 def trace_exp5_5(
     mt,
     a_ex,                           # output from ctu.create_analysis_sample_dicts()
@@ -1451,31 +1440,142 @@ def main_sdra_5_5_both_part_attention_removal(args):
 
 
 
+def main_sdra_5_attention_corruption(args):
+    """
+    Exp 5.* unified entry point
+    """
+    # spider_dataset_path = args.spider_dataset_path
+    # spider_db_dir = args.spider_db_dir
+    # data_cache_dir = args.data_cache_dir
+
+    exp_config = EXP_5_CONFIGS[args.exp_id]
+
+    args.attn_corrupt_type = exp_config['attn_corrupt_type']
+    args.trace_exp_func_id = exp_config['trace_exp_func_id']
+
+    exp_name = f'exp={args.exp_id}_{args.ds}_{args.subject_type}-attn_crpt={args.attn_corrupt_type}'
+    if args.is_tmp:
+        exp_name += '-tmp'
+
+    result_save_dir = os.path.join(args.result_dir, exp_config['result_save_dir_name'])
+    os.makedirs(result_save_dir, exist_ok=True)
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+
+    mt_uskg = ctu.ModelAndTokenizer_USKG('t5-large-prefix')
+
+    processed_spider_dataset = ctu.load_spider_dataset(args, mt_uskg)
+    n_ex = len(processed_spider_dataset)
+
+    total_samples = 0
+    n_good_samples = 0
+    n_too_easy = 0
+    n_too_hard = 0
+
+    f = open(result_save_path, 'w')
+    start_id = 0
+    end_id = n_ex
+    # end_id = 10
+    stride = 111 if args.is_tmp else 1
+    # with open(result_save_path, 'w') as f:
+    for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
+        ex = processed_spider_dataset[ex_id]
+
+        analysis_samples = ctu.create_analysis_sample_dicts(
+            mt_uskg, ex, args.subject_type,
+            remove_struct_duplicate_nodes=True)
+
+        ex_out_dict = {'ex_id': ex_id}
+        
+        input_too_long = False
+        if len(analysis_samples) > 0:
+            # enc_sentence = analysis_samples[0]['enc_sentence']
+            # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
+            enc_tokenized = analysis_samples[0]['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+            
+            if input_len > 500:
+                # ex_out_dict['trace_results'] = []
+                ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+                input_too_long = True
+
+        ex_results = []
+        for a_ex in analysis_samples:
+            if input_too_long:
+                continue
+
+            a_ex = ctu.add_clean_prediction(mt_uskg, a_ex)
+            
+            trace_exp_func = f_reg.FUNC_REGISTRAR['trace_exp'][args.trace_exp_func_id]
+            result = trace_exp_func(
+                mt_uskg,
+                a_ex,
+                # part=args.part,
+                # attn_type=args.attn_type,
+                corrupt_type=args.corrupt_type,
+                attn_corrupt_type=args.attn_corrupt_type,
+            )
+
+            ex_results.append(result)
+
+            total_samples += 1
+            if result['is_good_sample']:
+                n_good_samples += 1
+            elif result['correct_prediction']:
+                n_too_easy += 1
+            else:
+                n_too_hard += 1
+
+        ex_out_dict['trace_results'] = ex_results
+        f.write(json.dumps(ex_out_dict, indent=None) + '\n')
+    f.close()
+
+    print('total_samples:', total_samples)
+    print('n_good_samples:', n_good_samples)
+    print('n_too_hard:', n_too_hard)
+    print('n_too_easy:', n_too_easy)
+
+
+
+
 EXP_5_CONFIGS = {
     ## Exp 5.3
     '5.3': {
         'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp5_3_attention_section_mutual_removal',
+        'trace_exp_func_id': '5.3',
     },
     '5.3.1': {
         'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp5_3_attention_section_mutual_removal',
+        'trace_exp_func_id': '5.3',
     },
     '5.3.2': {
         'attn_corrupt_type': 'logits',  # with re-normalization
+        'result_save_dir_name': 'exp5_3_attention_section_mutual_removal',
+        'trace_exp_func_id': '5.3',
     },
     ## Exp 5.4
     '5.4': {
         'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp5_4_decoder_cross_attention_removal',
+        'trace_exp_func_id': '5.4',
     },
     '5.4.1': {
         'attn_corrupt_type': 'logits',  # with re-normalization
+        'result_save_dir_name': 'exp5_4_decoder_cross_attention_removal',
+        'trace_exp_func_id': '5.4',
     },
     ## Exp 5.5
     '5.5': {
         'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp5_5_both_part_attention_removal',
+        'trace_exp_func_id': '5.5',
     },
     '5.5.1': {
         'attn_corrupt_type': 'logits',  # with re-normalization
-    }
+        'result_save_dir_name': 'exp5_5_both_part_attention_removal',
+        'trace_exp_func_id': '5.5',
+    },
 }
 
 
@@ -1508,13 +1608,13 @@ def main():
     ctu.evaluate_hardness.evaluator = ctu.load_evaluator(args)
 
     args.subject_type = 'column'
-    main_sdra_5_5_both_part_attention_removal(args)
+    main_sdra_5_attention_corruption(args)
 
     args.subject_type = 'table'
-    main_sdra_5_5_both_part_attention_removal(args)
+    main_sdra_5_attention_corruption(args)
 
     args.subject_type = 'table_alias'
-    main_sdra_5_5_both_part_attention_removal(args)
+    main_sdra_5_attention_corruption(args)
 
 
 
