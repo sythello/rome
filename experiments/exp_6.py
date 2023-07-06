@@ -25,6 +25,7 @@ from rome.tok_dataset import (
     length_collation,
 )
 from util import nethook
+from util import func_register as f_reg
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from experiments import causal_trace_uskg as ctu
@@ -188,13 +189,14 @@ def trace_exp6_0_encoding_corruption_effect_syntax(
     return result
 
 
-
+@f_reg.register('trace_exp', '6.1')
 def trace_exp6_1_attention_corruption_effect_syntax(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
     part='encoder',         # 'encoder', 'decoder'
     attn_type='self_attn',  # 'self_attn', 'cross_attn'
     corrupt_type='zero',    # 'zero', 'replace', 'add'
+    attn_corrupt_type='weights',    # 'weights', 'logits'
     # window=10,              # the window size to try to corrupt
     device='cuda',
 ):
@@ -323,7 +325,7 @@ def trace_exp6_1_attention_corruption_effect_syntax(
         inp=inp,
         answer_len=len(answers_t),
         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
-        replace=True,
+        attn_corrupt_type=attn_corrupt_type,
     )
     corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
     corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
@@ -387,6 +389,7 @@ def trace_exp6_1_attention_corruption_effect_syntax(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['low_layers'] = _score
 
@@ -395,6 +398,7 @@ def trace_exp6_1_attention_corruption_effect_syntax(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2, N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['high_layers'] = _score
 
@@ -404,19 +408,21 @@ def trace_exp6_1_attention_corruption_effect_syntax(
             inp=inp,
             answers_t=answers_t,
             mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
+            attn_corrupt_type=attn_corrupt_type,
         ).item()
         result['trace_scores'][mix_k]['all_layers'] = _score
 
     return result
 
 
-
+@f_reg.register('trace_exp', '6.2')
 def trace_exp6_2_decoder_cross_attention_corruption_syntax(
     mt,
     a_ex,                   # output from ctu.create_analysis_sample_dicts()
     # part='encoder',         # 'encoder', 'decoder'
     # attn_type='self_attn',  # 'self_attn', 'cross_attn'
     corrupt_type='zero',    # 'zero', 'replace', 'add'
+    attn_corrupt_type='weights',    # 'weights', 'logits'
     # window=10,              # the window size to try to corrupt
     device='cuda',
 ):
@@ -501,7 +507,7 @@ def trace_exp6_2_decoder_cross_attention_corruption_syntax(
         inp=inp,
         answer_len=len(answers_t),
         mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
-        replace=True,
+        attn_corrupt_type=attn_corrupt_type,
     )
     corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
     corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
@@ -545,8 +551,8 @@ def trace_exp6_2_decoder_cross_attention_corruption_syntax(
 
     for mix_k, mix_mask in att_mix_mask_dict.items():
         # TEMP: only run for newly added sections
-        if not mix_k.endswith('o'):
-            continue
+        # if not mix_k.endswith('o'):
+        #     continue
         # END TEMP
 
         for layers_k, layers_range in layers_range_dict.items():
@@ -555,6 +561,7 @@ def trace_exp6_2_decoder_cross_attention_corruption_syntax(
                 inp=inp,
                 answers_t=answers_t,
                 mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in layers_range},
+                attn_corrupt_type=attn_corrupt_type,
             ).item()
             result['trace_scores'][mix_k][layers_k] = _score
 
@@ -809,6 +816,92 @@ def main_sdra_6_2_decoder_cross_attention_corruption_syntax(args):
     f.close()
 
 
+
+def main_sdra_6_attention_corruption_syntax(args):
+    """
+    Exp 6.*
+    """
+    # spider_dataset_path = args.spider_dataset_path
+    # spider_db_dir = args.spider_db_dir
+    # data_cache_dir = args.data_cache_dir
+
+    exp_config = EXP_6_CONFIGS[args.exp_id]
+
+    args.attn_corrupt_type = exp_config['attn_corrupt_type']
+    args.trace_exp_func_id = exp_config['trace_exp_func_id']
+
+    exp_name = f'exp={args.exp_id}_{args.ds}-attn_crpt={args.attn_corrupt_type}'
+    if args.is_tmp:
+        exp_name += '-tmp'
+
+    result_save_dir = os.path.join(args.result_dir, exp_config['result_save_dir_name'])
+    os.makedirs(result_save_dir, exist_ok=True)
+    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+
+    mt_uskg = ctu.ModelAndTokenizer_USKG('t5-large-prefix')
+
+    processed_spider_dataset = ctu.load_spider_dataset(args, mt_uskg)
+    n_ex = len(processed_spider_dataset)
+
+    total_samples = 0
+    n_good_samples = 0
+
+    f = open(result_save_path, 'w')
+    start_id = 0
+    end_id = n_ex
+    # end_id = 10
+    stride = 111 if args.is_tmp else 1
+    # with open(result_save_path, 'w') as f:
+    for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
+        ex = processed_spider_dataset[ex_id]
+
+        analysis_samples = ctu.create_syntax_analysis_sample_dicts(mt_uskg, ex)
+
+        ex_out_dict = {'ex_id': ex_id}
+        
+        input_too_long = False
+        if len(analysis_samples) > 0:
+            # enc_sentence = analysis_samples[0]['enc_sentence']
+            # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
+            enc_tokenized = analysis_samples[0]['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+            
+            if input_len > 500:
+                # ex_out_dict['trace_results'] = []
+                ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+                input_too_long = True
+
+        ex_results = []
+        for a_ex in analysis_samples:
+            if input_too_long:
+                continue
+
+            a_ex = ctu.add_clean_prediction(mt_uskg, a_ex)
+            
+            trace_exp_func = f_reg.FUNC_REGISTRAR['trace_exp'][args.trace_exp_func_id]
+            result = trace_exp_func(
+                mt_uskg,
+                a_ex,
+                attn_corrupt_type=args.attn_corrupt_type,
+            )
+
+            ex_results.append(result)
+
+            total_samples += 1
+            if result['correct_prediction']:
+                n_good_samples += 1
+
+        # ex_out_dict = {
+        #     'ex_id': ex_id,
+        #     'trace_results': ex_results,
+        # }
+        ex_out_dict['trace_results'] = ex_results
+        f.write(json.dumps(ex_out_dict, indent=None) + '\n')
+    f.close()
+
+
+
+
 EXP_6_CONFIGS = {
     ## Exp 6.1
     '6.1': {
@@ -836,7 +929,18 @@ EXP_6_CONFIGS = {
 
 
 def main():
-    args = Namespace()
+    # Create the ArgumentParser object
+    parser = argparse.ArgumentParser()
+
+    # Add different types of arguments
+    parser.add_argument('-e', '--exp_id', required=True, help='Experiment ID')
+    parser.add_argument('-t', '--is_tmp', action='store_true', help='Do a temp debug run')
+    # parser.add_argument('-d', '--arg4', choices=['option1', 'option2', 'option3'], help='An argument with limited choices')
+    # parser.add_argument('-e', '--arg5', nargs='+', help='An argument with multiple values')
+
+    # Parse the command-line arguments
+    args = parser.parse_args()
+    
     args.ds = 'dev'                     # train, dev
     # args.subject_type = 'column'         # table, table_alias, column, (value)
     # args.part = 'encoder'               # encoder, decoder, both
@@ -851,7 +955,7 @@ def main():
 
     ctu.evaluate_hardness.evaluator = ctu.load_evaluator(args)
 
-    main_sdra_6_2_decoder_cross_attention_corruption_syntax(args)
+    main_sdra_6_attention_corruption_syntax(args)
 
 
 
