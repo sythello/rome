@@ -2779,7 +2779,7 @@ def create_analysis_sample_dicts(
         remove_struct_duplicate_nodes=True):
     """
     BBB
-    Create a new sample dict or analysis purpose 
+    Create new sample dicts for analysis purpose 
     Return:
         analysis_ex_dicts: all basic info needed for any analysis
     """
@@ -3084,7 +3084,6 @@ def create_syntax_analysis_sample_dicts(
 
 
 
-
 def add_clean_prediction(
         mt,
         a_ex,
@@ -3140,23 +3139,25 @@ def make_basic_result_dict(a_ex):
         'enc_sentence': a_ex['enc_sentence'],
         'seq_out': a_ex['seq_out'],
         'dec_prompt': a_ex['dec_prompt'],
-        'expect': a_ex['expect'],
-        'expect_type': a_ex['expect_type'],
         'db_id': a_ex['db_id'],
-        # 'expect_input_ranges': a_ex['expect_input_ranges'],
     }
 
-    _optional_keys = ['expect_input_ranges', 'in_quoted_literal', 'self_ranges', 'struct_context_ranges']
+    _optional_keys = ['expect', 'expect_type', 'expect_input_ranges', 'in_quoted_literal', 'self_ranges', 'struct_context_ranges',
+                      'col_self_ranges', 'col_context_ranges', 'tab_self_ranges', 'tab_context_ranges']
     for k in _optional_keys:
         if k in a_ex:
             result_dict[k] = a_ex[k]
 
-    node = a_ex['expect']
+    node = a_ex.get('expect', None)
+    node_type = a_ex.get('expect_type', None)
     col2table = a_ex['col2table']
-    if a_ex['expect_type'] == 'column':
+    if node_type is None:
+        assert node is None, str(a_ex)
+        pass
+    elif node_type == 'column':
         # col2table[node] is a list. TODO: deal with duplicated column names
         result_dict['expect_table'] = col2table[node][0]
-    elif a_ex['expect_type'] == 'table':
+    elif node_type == 'table':
         result_dict['expect_table'] = node
     
     if 'answer' in a_ex:
@@ -3169,6 +3170,123 @@ def make_basic_result_dict(a_ex):
         result_dict['category'] = a_ex['category']
 
     return result_dict
+
+
+def create_analysis_sample_dicts_all_nodes(
+        mt,
+        ex,
+        remove_struct_duplicate_nodes=True):
+    
+    """
+    BBB
+    Create a new a_ex for analysis purpose on all nodes; save the node used/unused
+    Return:
+        a_ex (Dict): all basic info needed for any analysis
+    """
+
+    a_ex_col_list = create_analysis_sample_dicts(
+                    mt, 
+                    ex,
+                    subject_type='column',
+                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
+    a_ex_tab_list = create_analysis_sample_dicts(
+                    mt,
+                    ex,
+                    subject_type='table',
+                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
+    a_ex_list = a_ex_col_list + a_ex_tab_list
+
+    a_ex = copy.deepcopy(a_ex_list[0])
+    del a_ex['expect']
+    del a_ex['expect_input_ranges']
+    del a_ex['self_ranges']
+    del a_ex['context_ranges']
+    del a_ex['expect_type']
+    del a_ex['node_name_ranges']
+    del a_ex['category']['node_role']
+    del a_ex['category']['text_match']
+    del a_ex['category']['node_len']
+    a_ex['dec_prompt'] = 'select'       # placeholder
+
+    token_ranges_dict = a_ex['token_ranges_dict']
+    text_range = a_ex['text_range']
+    struct_range = a_ex['struct_range']
+
+    occ_cols = [d['expect'] for d in a_ex_col_list]
+    occ_tabs = [d['expect'] for d in a_ex_tab_list]
+    
+    col_name_ranges = a_ex['struct_node_ranges_dict']['col_name_ranges']
+    table_name_ranges = a_ex['struct_node_ranges_dict']['table_name_ranges']
+
+    non_occ_cols = [col for col in col_name_ranges
+                        if (col not in occ_cols) and not (remove_struct_duplicate_nodes and len(col_name_ranges[col]) > 1)]
+    non_occ_tabs = [tab for tab in table_name_ranges
+                        if (tab not in occ_tabs) and not (remove_struct_duplicate_nodes and len(table_name_ranges[tab]) > 1)]
+
+    a_ex['occ_cols'] = occ_cols
+    a_ex['occ_tabs'] = occ_tabs
+    a_ex['non_occ_cols'] = non_occ_cols
+    a_ex['non_occ_tabs'] = non_occ_tabs
+
+    a_ex['col_self_ranges'] = dict()
+    a_ex['col_context_ranges'] = dict()
+    a_ex['tab_self_ranges'] = dict()
+    a_ex['tab_context_ranges'] = dict()
+
+    ## Processing for struct context
+    _all_node_range_lists = list(token_ranges_dict['col_name_ranges'].values()) + list(token_ranges_dict['table_name_ranges'].values()) + list(token_ranges_dict['db_id_ranges'].values())
+    _all_node_ranges = [rg
+                        for rg_list in _all_node_range_lists
+                        for rg in rg_list]
+    _all_left_endpoint = [s for s, e in _all_node_ranges] + [struct_range[1]]   # add start of non-struct
+    _all_right_endpoint = [e for s, e in _all_node_ranges] + [struct_range[0]]  # add end of non-struct
+
+    for col in occ_cols + non_occ_cols:
+        expect_input_ranges = token_ranges_dict['col_name_ranges'][col]
+
+        context_range_endpoints = [struct_range[0]]
+        self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
+        for tok_s, tok_e in expect_input_ranges:
+            _l = max([e for e in _all_right_endpoint if e <= tok_s])
+            _r = min([s for s in _all_left_endpoint if s >= tok_e])
+            context_range_endpoints.extend([_l, _r])
+            self_range_endpoints.extend([_l, _r])
+        context_range_endpoints.append(struct_range[1])
+
+        self_ranges = [(self_range_endpoints[i], self_range_endpoints[i+1])
+                        for i in range(0, len(self_range_endpoints), 2)]
+
+        context_ranges = [(context_range_endpoints[i], context_range_endpoints[i+1])
+                            for i in range(0, len(context_range_endpoints), 2)]
+        context_ranges = [(s, e) for s, e in context_ranges if e > s]       # rule out empty spans
+
+        a_ex['col_self_ranges'][col] = self_ranges
+        a_ex['col_context_ranges'][col] = context_ranges
+
+
+    for tab in occ_tabs + non_occ_tabs:
+        expect_input_ranges = token_ranges_dict['table_name_ranges'][tab]
+
+        context_range_endpoints = [struct_range[0]]
+        self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
+        for tok_s, tok_e in expect_input_ranges:
+            _l = max([e for e in _all_right_endpoint if e <= tok_s])
+            _r = min([s for s in _all_left_endpoint if s >= tok_e])
+            context_range_endpoints.extend([_l, _r])
+            self_range_endpoints.extend([_l, _r])
+        context_range_endpoints.append(struct_range[1])
+
+        self_ranges = [(self_range_endpoints[i], self_range_endpoints[i+1])
+                        for i in range(0, len(self_range_endpoints), 2)]
+
+        context_ranges = [(context_range_endpoints[i], context_range_endpoints[i+1])
+                            for i in range(0, len(context_range_endpoints), 2)]
+        context_ranges = [(s, e) for s, e in context_ranges if e > s]       # rule out empty spans
+
+        a_ex['tab_self_ranges'][tab] = self_ranges
+        a_ex['tab_context_ranges'][tab] = context_ranges
+
+    return a_ex
 
 
 def main_sdra_1_struct_node_restore(args):
