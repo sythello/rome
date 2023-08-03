@@ -500,15 +500,16 @@ def trace_exp4_1(
         _self_attn = encoder_attentions[:, :, first_tok_pos, _self_indices].sum(dim=-1)
         _sect_att_weights['self'] = _self_attn
 
-        ## context indices doesn't include EOS
+        ## context indices doesn't include EOS and mid prompt
         _context_ranges = a_ex['col_context_ranges'][col]
         _context_indices = [preseqlen + i for s, e in _context_ranges for i in range(s, e)]
         _context_attn = encoder_attentions[:, :, first_tok_pos, _context_indices].sum(dim=-1)
         _sect_att_weights['context'] = _context_attn
 
-        ## ADD: EOS as a section
+        ## ADD: "others" as a section (including EOS and mid prompt)
+        _mid_attn = encoder_attentions[:, :, first_tok_pos, preseqlen + text_ed : preseqlen + struct_st].sum(dim=-1)
         _eos_attn = encoder_attentions[:, :, first_tok_pos, -1]
-        _sect_att_weights[f'eos'] = _eos_attn
+        _sect_att_weights['others'] = _mid_attn + _eos_attn
 
         for k, v in _sect_att_weights.items():
             v = v.detach().cpu().numpy().tolist()
@@ -534,15 +535,16 @@ def trace_exp4_1(
         _self_attn = encoder_attentions[:, :, first_tok_pos, _self_indices].sum(dim=-1)
         _sect_att_weights['self'] = _self_attn
 
-        ## context indices doesn't include EOS
+        ## context indices doesn't include EOS and mid prompt
         _context_ranges = a_ex['tab_context_ranges'][tab]
         _context_indices = [preseqlen + i for s, e in _context_ranges for i in range(s, e)]
         _context_attn = encoder_attentions[:, :, first_tok_pos, _context_indices].sum(dim=-1)
         _sect_att_weights['context'] = _context_attn
 
-        ## ADD: EOS as a section
+        ## ADD: "others" as a section (including EOS and mid prompt)
+        _mid_attn = encoder_attentions[:, :, first_tok_pos, preseqlen + text_ed : preseqlen + struct_st].sum(dim=-1)
         _eos_attn = encoder_attentions[:, :, first_tok_pos, -1]
-        _sect_att_weights[f'eos'] = _eos_attn
+        _sect_att_weights['others'] = _mid_attn + _eos_attn
 
         for k, v in _sect_att_weights.items():
             v = v.detach().cpu().numpy().tolist()
