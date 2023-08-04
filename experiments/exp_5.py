@@ -761,13 +761,26 @@ def trace_exp5_4_decoder_cross_attention_removal(
     
     """ Starting Exp5.4 """
 
+    layers_range_dict = {
+        # 'q1_layers': range(N_layers // 4),
+        # 'q2_layers': range(N_layers // 4, N_layers // 2),
+        # 'q3_layers': range(N_layers // 2, N_layers * 3 // 4),
+        # 'q4_layers': range(N_layers * 3 // 4, N_layers),
+        'low_layers': range(N_layers // 2),
+        'mid_layers': range(N_layers // 4, N_layers * 3 // 4),
+        'high_layers': range(N_layers // 2, N_layers),
+        'all_layers': range(N_layers),
+    }
+
     result['trace_scores'] = dict()
     for mix_k in att_mix_mask_dict.keys():
-        result['trace_scores'][mix_k] = {
-            'low_layers': None,     # 0 - 11
-            'high_layers': None,    # 12 - 23
-            'all_layers': None,
-        }
+        result['trace_scores'][mix_k] = dict()
+        # {
+        #     'low_layers': None,     # 0 - 11
+        #     'mid_layers': None,     # 6 - 17
+        #     'high_layers': None,    # 12 - 23
+        #     'all_layers': None,
+        # }
 
     for mix_k, mix_mask in att_mix_mask_dict.items():
         # TEMP: only run for newly added sections
@@ -776,32 +789,42 @@ def trace_exp5_4_decoder_cross_attention_removal(
         #     continue
         # END TEMP
 
-        _score = ctu.trace_attention_manip_uskg_multi_token(
-            model=mt.model,
-            inp=inp,
-            answers_t=answers_t,
-            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2)},
-            attn_corrupt_type=attn_corrupt_type,
-        ).item()
-        result['trace_scores'][mix_k]['low_layers'] = _score
+        for layer_k, layer_range in layers_range_dict.items():
+            _score = ctu.trace_attention_manip_uskg_multi_token(
+                model=mt.model,
+                inp=inp,
+                answers_t=answers_t,
+                mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in layer_range},
+                attn_corrupt_type=attn_corrupt_type,
+            ).item()
+            result['trace_scores'][mix_k][layer_k] = _score
 
-        _score = ctu.trace_attention_manip_uskg_multi_token(
-            model=mt.model,
-            inp=inp,
-            answers_t=answers_t,
-            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2, N_layers)},
-            attn_corrupt_type=attn_corrupt_type,
-        ).item()
-        result['trace_scores'][mix_k]['high_layers'] = _score
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2)},
+        #     attn_corrupt_type=attn_corrupt_type,
+        # ).item()
+        # result['trace_scores'][mix_k]['low_layers'] = _score
 
-        _score = ctu.trace_attention_manip_uskg_multi_token(
-            model=mt.model,
-            inp=inp,
-            answers_t=answers_t,
-            mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
-            attn_corrupt_type=attn_corrupt_type,
-        ).item()
-        result['trace_scores'][mix_k]['all_layers'] = _score
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers // 2, N_layers)},
+        #     attn_corrupt_type=attn_corrupt_type,
+        # ).item()
+        # result['trace_scores'][mix_k]['high_layers'] = _score
+
+        # _score = ctu.trace_attention_manip_uskg_multi_token(
+        #     model=mt.model,
+        #     inp=inp,
+        #     answers_t=answers_t,
+        #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : mix_mask for l in range(N_layers)},
+        #     attn_corrupt_type=attn_corrupt_type,
+        # ).item()
+        # result['trace_scores'][mix_k]['all_layers'] = _score
 
     return result
 

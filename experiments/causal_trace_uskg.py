@@ -2810,7 +2810,9 @@ def create_analysis_sample_dicts(
 
     alias2table = parse_sql_alias2table(ex['seq_out'])
 
+    # Needs "struct_in", "enc_sentence"; adds "struct_node_ranges_dict"
     token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
+
     if subject_type == 'column':
         node_name_ranges = token_ranges_dict['col_name_ranges']
     elif subject_type == 'table':
@@ -3193,7 +3195,7 @@ def create_analysis_sample_dicts_all_nodes(
                     mt,
                     ex,
                     subject_type='table',
-                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
+                    remove_struct_duplicate_nodes=False)     # Table names never duplicated. Sometimes overlap with column name, but that case is distinguishable. Also, make sure at least one a_ex exist, so we don't get empty list and index error 
     a_ex_list = a_ex_col_list + a_ex_tab_list
 
     a_ex = copy.deepcopy(a_ex_list[0])

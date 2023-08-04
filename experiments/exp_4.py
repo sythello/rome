@@ -662,8 +662,8 @@ def main_sdra_4_1_attention_weights_distribution(args):
     total_samples = 0
     n_good_samples = 0
 
-    f = open(result_save_path, 'w')
-    start_id = 0
+    f = open(result_save_path, 'a')
+    start_id = 3086
     end_id = n_ex
     # end_id = 50
     stride = 111 if args.is_tmp else 1
@@ -677,12 +677,32 @@ def main_sdra_4_1_attention_weights_distribution(args):
             remove_struct_duplicate_nodes=True)
 
         ex_out_dict = {'ex_id': ex_id}
+
+        input_too_long = False
+
+        enc_tokenized = analysis_ex['enc_tokenized']
+        input_len = len(enc_tokenized['input_ids'])
+        if input_len > 500:
+            ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
+            input_too_long = True
+
+        if input_too_long:
+            ## Make some placeholders 
+            # result_dict = ctu.make_basic_result_dict(ex)
+            # result_dict['attentions'] = {
+            #     'col': dict(),
+            #     'tab': dict(),
+            # }
+            result_dict = None
+            ex_out_dict['trace_results'] = result_dict
+            continue
         
         result = trace_exp4_1(mt_uskg, analysis_ex)
 
         ex_out_dict['trace_results'] = result
 
         f.write(json.dumps(ex_out_dict, indent=None) + '\n')
+        f.flush()
     f.close()
 
 
@@ -692,10 +712,10 @@ def main():
 
     parser.add_argument('-e', '--exp_id', required=True, help='Experiment ID')
     parser.add_argument('-t', '--is_tmp', action='store_true', help='Do a temp debug run')
-    
+    parser.add_argument('-ds', '--ds', default='dev', help='The data split to use: dev | train')
+
     args = parser.parse_args()
 
-    args.ds = 'dev'                     # train, dev
     # args.subject_type = 'column'         # table, table_alias, column, (value)
     # args.part = 'both'               # encoder, decoder, both
     args.spider_dataset_path = f'/home/yshao/Projects/SDR-analysis/data/spider/{args.ds}+ratsql_graph.json'

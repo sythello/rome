@@ -818,10 +818,30 @@ def check_table_text_match(spider_ex, tab):
 
 def parse_sql_alias2table(sql_str):
     """ Assume that alias-table binding only happens in format like '... JOIN table AS t1 ...' """
-    sql_tokens = sql_str.lower().strip().split()
+    # sql_tokens = sql_str.lower().strip().split()
+    sql_tokens = separate_punct(sql_str).lower().strip().split()
     alias2table = dict()
 
+    in_quote = None
     for i, t in enumerate(sql_tokens):
+        if t in ['"', "'"]:
+            if in_quote is None:
+                in_quote = t
+                # print(f'{t} Quote: None -> {in_quote}')
+            elif in_quote == t:
+                # print(f'{t} Quote: {in_quote} -> None')
+                in_quote = None
+            else:
+                pass
+                # print(f'{t} Quote: {in_quote}')
+            continue
+        
+        # print(f'{t} Quote: {in_quote}')
+
+        if in_quote is not None:
+            # in a quote, skipping
+            continue
+
         if t == 'as':
             assert 0 < i < len(sql_tokens) - 1, sql_str
             assert sql_tokens[i-2] in {'from', 'join'}, sql_str
