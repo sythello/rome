@@ -114,12 +114,18 @@ SQL_SYNTAX_PHRASES = [
     'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'from', 'where', 'group by',
     'having', 'order by', 'join', 'union', 'in', 'like', 'between', 'null', 'distinct', 'as', 'inner join',
     'left join', 'right join', 'full outer join', 'on', 'not', 'exists', 'all', 'any', 'avg', 'sum', 'count',
-    'max', 'min', 'and', 'or', 'not', '=', '<>', '!=', '<', '>', '<=', '>=', '*'
+    'max', 'min', 'and', 'or', 'not', '=', '<>', '!=', '<', '>', '<=', '>=',
+    'asc', 'desc', 'limit', 'except', 'intersect'    # Newly added
 ]
 
 # Don't need delimiters around to identify 
 # There is a tricky col-name "official_ratings_(millions)"; luckily it never appears in gold SQL
-SQL_SYNTAX_PUNCTS = ['(', ')', ',', '.', '"', "'", '%']
+SQL_SYNTAX_PUNCTS = ['(', ')', ',', '.', '"', "'", '%', '+', '-', '*', '/', ';']
+
+
+class SDRASampleError(Exception):
+    """ Used for handling erroneous samples in SDRA. """
+    pass
 
 
 def load_model_uskg(model_name, untie_embeddings=False):
@@ -440,7 +446,7 @@ def separate_punct(s, exclude='_'):
 
 def separate_punct_by_offset(seq):
     """
-    BBBB 
+    BBB 
     avg(age), min(age)  ==>  avg ( age ) , min ( age )
     exclude (Iterable): the puncts not to separate (e.g. "_" as in "pet_type")
     by default: _ (song_name)
@@ -479,6 +485,121 @@ def separate_punct_by_offset(seq):
             st = e
 
     return tok_ranges
+
+
+def categorize_tokens_offset(seq, tok_ranges):
+    """
+    BBBB 
+    Based on the original SQL `seq` and separate_punct_by_offset() output `tok_ranges`,
+    find the type (col / table / table_alias / val / syntax) of each token.
+
+    Return: Dict[Tuple, str]: range -> type
+    """
+
+    # select t1.company_name from third_party_companies as t1 join maintenance_contracts as t2 on t1.company_id = t2.maintenance_contract_company_id join ref_company_types as t3 on t1.company_type_code = t3.company_type_code order by t2.contract_end_date desc limit 1
+
+    # L = len(seq)
+    L_rg = len(tok_ranges)
+
+    syntax_phrases_tokenized = [syntax_ph.split(' ') for syntax_ph in SQL_SYNTAX_PHRASES]
+    syntax_max_len = max([len(ph_toks) for ph_toks in syntax_phrases_tokenized])
+    assert syntax_max_len == 3
+
+    tok_ranges2type = dict()
+
+    in_quote = None
+    for i in range(len(tok_ranges)):
+        s, e = tok_ranges[i]
+        tok = seq[s:e]
+
+        tok_L2 = '' if i <= 1 else seq[tok_ranges[i-2][0] : tok_ranges[i-2][1]]
+        tok_L1 = '' if i == 0 else seq[tok_ranges[i-1][0] : tok_ranges[i-1][1]]
+        tok_R1 = '' if i == L_rg - 1 else seq[tok_ranges[i+1][0] : tok_ranges[i+1][1]]
+        tok_R2 = '' if i >= L_rg - 2 else seq[tok_ranges[i+2][0] : tok_ranges[i+2][1]]
+
+        if tok in ['"', "'"]:
+            # Quote
+            if in_quote is None:
+                in_quote = tok
+            elif in_quote == tok:
+                in_quote = None
+            tok_ranges2type[(s, e)] = 'val'
+            continue
+        
+        # Not quote, in quote
+        if in_quote is not None:
+            tok_ranges2type[(s, e)] = 'val'
+            continue
+
+        # Check numeric val
+        if re.match(r'\d+', tok):
+            tok_ranges2type[(s, e)] = 'val'
+            continue
+
+        # Check for alias
+        if re.match(r't\d+', tok) or re.match(r't\d+\.', tok):
+            tok_ranges2type[(s, e)] = 'table_alias'
+            continue
+
+        # Check for syntax
+        _window = [tok_L2, tok_L1, tok, tok_R1, tok_R2]
+        _cen_id = 2
+        _decided = False
+        for d in range(1, syntax_max_len + 1):
+            for l in range(_cen_id - d + 1, _cen_id + 1):
+                # all ranges including center
+                r = l + d
+                _ph_toks = _window[l : r]
+                _ph = ' '.join(_ph_toks).strip()
+                if _ph in SQL_SYNTAX_PHRASES + SQL_SYNTAX_PUNCTS:
+                    tok_ranges2type[(s, e)] = 'syntax'
+                    _decided = True
+                    break
+            if _decided:
+                break
+
+        if _decided:
+            continue
+
+        # Column vs Table; X.Y -> X table, Y column
+        if tok_L1 == '.':
+            tok_ranges2type[(s, e)] = 'column'
+            continue
+        elif tok_R1 == '.':
+            tok_ranges2type[(s, e)] = 'table'
+            continue
+
+        if tok_L1 != '' and tok_ranges2type.get(tok_ranges[i-1], None) == 'table_alias':
+            # Left is alias, this is column
+            tok_ranges2type[(s, e)] = 'column'
+            continue
+
+        # Column vs Table without '.'
+        if tok_L1 in ['select', 'where', 'by', 'distinct', '(', ',']:
+            tok_ranges2type[(s, e)] = 'column'
+            continue
+        if tok_R1 in ['like']:
+            tok_ranges2type[(s, e)] = 'column'
+            continue
+        if tok_L1 in ['join', 'from']:
+            tok_ranges2type[(s, e)] = 'table'
+            continue
+        if set.intersection({'=', '!=', '>', '<', '>=', '<=', '+', '-', '*', '/', '%', 'and', 'or', 'not'}, {tok_L1, tok_R1}):
+            # Is an op_node in a condition
+            tok_ranges2type[(s, e)] = 'column'
+            continue
+
+
+        raise ValueError(seq, (s, e), tok, '** Not able to decide')
+
+        # SQL_SYNTAX_PHRASES = [
+        #     'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'from', 'where', 'group by',
+        #     'having', 'order by', 'join', 'union', 'in', 'like', 'between', 'null', 'distinct', 'as', 'inner join',
+        #     'left join', 'right join', 'full outer join', 'on', 'not', 'exists', 'all', 'any', 'avg', 'sum', 'count',
+        #     'max', 'min', 'and', 'or', 'not', '=', '<>', '!=', '<', '>', '<=', '>=', '*'
+        # ]
+
+    return tok_ranges2type
 
 
 def decode_tokens(tokenizer, token_array):
@@ -605,19 +726,29 @@ def find_struct_name_ranges(tokenizer, ex):
     struct_in = ex['struct_in']
     if 'enc_sentence' not in ex:
         ex['enc_sentence'] = f"{text_in}; structed knowledge: {struct_in}"
-
-    token_array = tokenizer(ex['enc_sentence'])['input_ids']
     
-
     # sentence = decode_sentences(tokenizer, token_array)
     # assert USKG_SPLITTER in sentence, f'"{sentence}" does not have splitter {USKG_SPLITTER}'
     # # select the struct_in part
-    text_range, struct_range = find_text_struct_in_range(tokenizer, token_array)
+    if ('text_range' not in ex) or ('struct_range' not in ex):
+        token_array = tokenizer(ex['enc_sentence'])['input_ids']
+        text_range, struct_range = find_text_struct_in_range(tokenizer, token_array)
+        ex['text_range'] = text_range
+        ex['struct_range'] = struct_range
+    else:
+        text_range = ex['text_range']
+        struct_range = ex['struct_range']
+    
     sb, se = struct_range
     # token_array = token_array[sb : se]
     # struct_in = ' '.join(decode_tokens(tokenizer, token_array))
 
-    parsed_struct_in = parse_struct_in(struct_in)
+    if 'parsed_struct_in' not in ex:
+        parsed_struct_in = parse_struct_in(struct_in)
+        ex['parsed_struct_in'] = parsed_struct_in
+    else:
+        parsed_struct_in = ex['parsed_struct_in']
+
     db_id_t, tables = parsed_struct_in
     stk = tokenizer(struct_in)
 
@@ -657,8 +788,6 @@ def find_struct_name_ranges(tokenizer, ex):
         val_name_ranges=val_name_ranges,
     )
 
-    ex['text_range'] = text_range
-    ex['struct_range'] = struct_range
     ex['struct_node_ranges_dict'] = struct_node_ranges_dict
 
     return struct_node_ranges_dict

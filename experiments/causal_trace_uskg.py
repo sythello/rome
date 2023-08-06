@@ -28,10 +28,11 @@ from util import nethook
 from util.globals import DATA_DIR
 from util.runningstats import Covariance, tally
 from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NAME, \
-    SQL_SYNTAX_PHRASES, SQL_SYNTAX_PUNCTS, \
+    SQL_SYNTAX_PHRASES, SQL_SYNTAX_PUNCTS, SDRASampleError, \
     load_model_uskg, load_raw_dataset, load_spider_dataset, run_model_forward_uskg, \
     decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
-    separate_punct, separate_punct_by_offset, make_dec_prompt, parse_struct_in, ensure_list, \
+    separate_punct, separate_punct_by_offset, categorize_tokens_offset, \
+    make_dec_prompt, parse_struct_in, ensure_list, \
     ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
     evaluate_hardness, detect_node_role, check_col_text_match, check_table_text_match, \
     parse_sql_alias2table, nested_list_processing, nested_json_processing
@@ -2797,80 +2798,137 @@ def create_analysis_sample_dicts(
     ex['struct_range'] = struct_range
     
     parsed_struct_in = parse_struct_in(struct_in)
+    ex['parsed_struct_in'] = parsed_struct_in
+
+    alias2table = parse_sql_alias2table(ex['seq_out'])
+    ex['alias2table'] = alias2table
+
     col2table = defaultdict(list)
-    node_name_counter = Counter()
+    # node_name_counter = Counter()
+    col_name_counter = Counter()
+    tab_name_counter = Counter()
     db_id_t, tables = parsed_struct_in
     for table_name_t, cols in tables:
         _, table_name, _ = table_name_t
-        node_name_counter[table_name] += 1
+        tab_name_counter[table_name] += 1
         for col_name_t, vals in cols:
             _, col_name, _ = col_name_t
             col2table[col_name].append(table_name)
-            node_name_counter[col_name] += 1
-
-    alias2table = parse_sql_alias2table(ex['seq_out'])
+            col_name_counter[col_name] += 1
+    
+    # YS NOTE: Merging col and tab to remove "col & table" nodes when remove_dup = True,
+    # since currently make_dec_prompt() can't distinguish node type from SQL 
+    node_name_counter = col_name_counter + tab_name_counter
 
     # Needs "struct_in", "enc_sentence"; adds "struct_node_ranges_dict"
     token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
 
+    ## TODO: remove obsolete separate_punct(), replace with separate_punct_by_offset()
+    # sql_tokens = separate_punct(ex['seq_out']).strip().lower().split(' ')
+    sql_token_ranges = separate_punct_by_offset(ex['seq_out'])
+    sql_tokens = [ex['seq_out'][s:e] for s, e in sql_token_ranges]
+    tok_ranges2type = categorize_tokens_offset(ex['seq_out'], sql_token_ranges)
+
+    type2tok_ranges = defaultdict(list)
+    for _rg, _type in tok_ranges2type.items():
+        type2tok_ranges[_type].append(_rg)
+
+    # ex['sql_tokens'] = sql_tokens
+    # ex['sql_token_ranges'] = sql_token_ranges
+    # ex['tok_ranges2type'] = tok_ranges2type
+
+    sql_col_nodes = set()
+    sql_tab_nodes = set()
+    sql_alias_nodes = set()
+    for _rg, _type in tok_ranges2type.items():
+        s, e = _rg
+        _tok = ex['seq_out'][s:e]
+        if _type == 'column':
+            sql_col_nodes.add(_tok)
+        elif _type == 'table':
+            sql_tab_nodes.add(_tok)
+        elif _type == 'table_alias':
+            sql_alias_nodes.add(_tok)
+
+    ## Sanity check: SQL node should occur in DB struct_in
+    for t in sql_col_nodes:
+        if col_name_counter[t] == 0:
+            err_msg = f'Column {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
+            raise SDRASampleError(err_msg)
+    for t in sql_tab_nodes:
+        if tab_name_counter[t] == 0:
+            err_msg = f'Table {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
+            raise SDRASampleError(err_msg)
+
+
     if subject_type == 'column':
         node_name_ranges = token_ranges_dict['col_name_ranges']
+        # node_name_counter = col_name_counter
     elif subject_type == 'table':
         node_name_ranges = token_ranges_dict['table_name_ranges']
+        # node_name_counter = tab_name_counter
     elif subject_type == 'table_alias':
         _table_name_ranges = token_ranges_dict['table_name_ranges']
         node_name_ranges = {
             a : _table_name_ranges[alias2table[a]]  for a in alias2table.keys()
         }
+        # node_name_counter = tab_name_counter
     else:
         raise NotImplementedError(subject_type)
     
-    sql_tokens = separate_punct(ex['seq_out']).split(' ')
-    sql_nodes = set()
-    for t in sql_tokens:
-        if t in node_name_ranges:
-            sql_nodes.add(t)
+    # sql_nodes = set()
+    # for t in sql_tokens:
+    #     if t in node_name_ranges:
+    #         sql_nodes.add(t)
     
-    # if subject_type == 'column':
-    #     for t in list(sql_nodes):
-    #         if len(col2table[t]) == 0:
-    #             raise ValueError(struct_in, t)
-    #         elif (len(col2table[t]) > 1) and remove_struct_duplicate_nodes:
-    #             sql_nodes.remove(t)
-    for t in list(sql_nodes):
+    sql_subject_ranges = []
+
+    for s, e in list(type2tok_ranges[subject_type]):
+        t = ex['seq_out'][s: e]
+
         if subject_type == 'table_alias':
+            if t.endswith('.'):
+                t = t[:-1]
             node_name = alias2table[t]
         else:
             node_name = t
-
+        
         _occ = node_name_counter[node_name]
         if _occ == 0:
+            # Should have already raised SDRASampleError above!
             raise ValueError(struct_in, t, node_name)
         elif _occ > 1 and remove_struct_duplicate_nodes:
-            sql_nodes.remove(t)
+            continue
+
+        sql_subject_ranges.append((s, e))
     
     # Add hardness info
     sql_hardness = evaluate_hardness(ex['seq_out'], ex['db_id'])
 
     analysis_ex_dicts =[]
-    for node in sql_nodes:
-        if subject_type == 'table_alias':
-            # A hack to make table aliases prediction use "t3." instead of "t3"
-            expect = node + '.'
-        else:
-            expect = node
+    # for node in sql_nodes:
+        # if subject_type == 'table_alias':
+        #     # A hack to make table aliases prediction use "t3." instead of "t3" (No longer needed, now if SQL has t3.xxx, t3. becomes a single token in sql_nodes)
+        #     expect = node + '.'
+        # else:
+        #     expect = node
+        # expect_input_ranges = node_name_ranges[node]
+        # dec_prompts = make_dec_prompt(ex['seq_out'], node)
 
-        expect_input_ranges = node_name_ranges[node]
-        dec_prompts = make_dec_prompt(ex['seq_out'], node)
+    for s, e in sql_subject_ranges:
+        node = expect = ex['seq_out'][s: e]
 
+        expect_input_ranges = node_name_ranges[node]    # this is input ranges, may be multiple
+        dec_prompt = ex['seq_out'][:s].strip()
 
-        ## Processing for struct context (exp3.1/3.2)
+        ## Processing for struct context; TODO: pull this part out (it's agnostic to `node`)
         _all_node_range_lists = list(token_ranges_dict['col_name_ranges'].values()) + list(token_ranges_dict['table_name_ranges'].values()) + list(token_ranges_dict['db_id_ranges'].values())
         _all_node_ranges = [rg
                             for rg_list in _all_node_range_lists
                             for rg in rg_list]
         _all_left_endpoint = [s for s, e in _all_node_ranges] + [struct_range[1]]   # add start of non-struct
         _all_right_endpoint = [e for s, e in _all_node_ranges] + [struct_range[0]]  # add end of non-struct
+        ## END TODO
 
         context_range_endpoints = [struct_range[0]]
         self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
@@ -2889,49 +2947,50 @@ def create_analysis_sample_dicts(
         context_ranges = [(s, e) for s, e in context_ranges if e > s]       # rule out empty spans
 
         
-        for dec_prompt in dec_prompts:
-            # For table_aliases, the "as" prompts are not useful (e.g. ... join table_name as ___) since in Spider the
-            # alias introductions are always monotonic, in the order of t1, t2, ... regardless of SQL
-            if (subject_type == 'table_alias') and (dec_prompt.split()[-1] == 'as'):
-                continue
+        # for dec_prompt in dec_prompts:
+    
+        # For table_aliases, the "as" prompts are not useful (e.g. ... join table_name as ___) since in Spider the
+        # alias introductions are always monotonic, in the order of t1, t2, ... regardless of SQL
+        if (subject_type == 'table_alias') and (dec_prompt.split()[-1] == 'as'):
+            continue
 
-            # Add role / text-match info
-            node_role = detect_node_role(dec_prompt)
-            if subject_type == 'column':
-                node_table = col2table[node][0]
-                text_match = check_col_text_match(ex, node, node_table)
-            elif subject_type == 'table':
-                text_match = check_table_text_match(ex, node)
-            elif subject_type == 'table_alias':
-                node_table = alias2table[node]
-                text_match = check_table_text_match(ex, node_table)
-            
-            # Add node len directly in category
-            node_len = len(mt.tokenizer.tokenize(expect))
-            node_len_str = str(node_len) if node_len <= 3 else '4+'
+        # Add role / text-match info
+        node_role = detect_node_role(dec_prompt)
+        if subject_type == 'column':
+            node_table = col2table[node][0]
+            text_match = check_col_text_match(ex, node, node_table)
+        elif subject_type == 'table':
+            text_match = check_table_text_match(ex, node)
+        elif subject_type == 'table_alias':
+            node_table = alias2table[node]
+            text_match = check_table_text_match(ex, node_table)
+        
+        # Add node len directly in category
+        node_len = len(mt.tokenizer.tokenize(expect))
+        node_len_str = str(node_len) if node_len <= 3 else '4+'
 
-            _ex = copy.deepcopy(ex)
-            _ex['dec_prompt'] = dec_prompt
-            _ex['expect'] = expect
-            _ex['expect_type'] = subject_type
-            _ex['remove_struct_duplicate_nodes'] = remove_struct_duplicate_nodes
-            _ex['parsed_struct_in'] = parsed_struct_in
-            _ex['col2table'] = col2table
-            _ex['token_ranges_dict'] = token_ranges_dict
-            _ex['node_name_ranges'] = node_name_ranges
-            _ex['expect_input_ranges'] = expect_input_ranges    # [(s, e), ...]
-            _ex['alias2table'] = alias2table
-            _ex['self_ranges'] = self_ranges
-            _ex['context_ranges'] = context_ranges
+        _ex = copy.deepcopy(ex)
+        _ex['dec_prompt'] = dec_prompt
+        _ex['expect'] = expect
+        _ex['expect_type'] = subject_type
+        _ex['remove_struct_duplicate_nodes'] = remove_struct_duplicate_nodes
+        # _ex['parsed_struct_in'] = parsed_struct_in    # moved to front
+        _ex['col2table'] = col2table
+        _ex['token_ranges_dict'] = token_ranges_dict
+        _ex['node_name_ranges'] = node_name_ranges
+        _ex['expect_input_ranges'] = expect_input_ranges    # [(s, e), ...]
+        # _ex['alias2table'] = alias2table  # moved to front
+        _ex['self_ranges'] = self_ranges
+        _ex['context_ranges'] = context_ranges
 
-            _ex['category'] = {
-                'sql_hardness': sql_hardness,
-                'node_role': node_role,
-                'text_match': text_match,
-                'node_len': node_len_str,
-            }
+        _ex['category'] = {
+            'sql_hardness': sql_hardness,
+            'node_role': node_role,
+            'text_match': text_match,
+            'node_len': node_len_str,
+        }
 
-            analysis_ex_dicts.append(_ex)
+        analysis_ex_dicts.append(_ex)
 
         # result['expect'] = node      # actually already available in ['answer']
         # result['subject_type'] = subject_type
@@ -3028,6 +3087,8 @@ def create_syntax_analysis_sample_dicts(
     # for syntax_p, is_punct in syntax_targets:
     #     dec_prompts = make_dec_prompt(ex['seq_out'], syntax_p)
 
+    ## TODO: use categorize_tokens_offset() to get syntax tokens
+    
     analysis_ex_dicts = []
     literal_quote = None      # Now only check literal within quotes (', ", `)
     for tok_char_span in sql_token_char_spans:
@@ -3195,8 +3256,15 @@ def create_analysis_sample_dicts_all_nodes(
                     mt,
                     ex,
                     subject_type='table',
-                    remove_struct_duplicate_nodes=False)     # Table names never duplicated. Sometimes overlap with column name, but that case is distinguishable. Also, make sure at least one a_ex exist, so we don't get empty list and index error 
+                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)     
+    
+    # (Table names never duplicated. Sometimes overlap with column name, but that case is distinguishable. Also, make sure at least one a_ex exist, so we don't get empty list and index error)
+    # Not true, experiments so far don't distinguish col/tab in make_dec_prompt()
+
     a_ex_list = a_ex_col_list + a_ex_tab_list
+
+    if len(a_ex_list) == 0:
+        raise SDRASampleError('No available nodes')
 
     a_ex = copy.deepcopy(a_ex_list[0])
     del a_ex['expect']

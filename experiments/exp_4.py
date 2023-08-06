@@ -662,8 +662,8 @@ def main_sdra_4_1_attention_weights_distribution(args):
     total_samples = 0
     n_good_samples = 0
 
-    f = open(result_save_path, 'a')
-    start_id = 3086
+    f = open(result_save_path, 'w')
+    start_id = 0
     end_id = n_ex
     # end_id = 50
     stride = 111 if args.is_tmp else 1
@@ -671,35 +671,38 @@ def main_sdra_4_1_attention_weights_distribution(args):
     for ex_id in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
         ex = processed_spider_dataset[ex_id]
 
-        analysis_ex = ctu.create_analysis_sample_dicts_all_nodes(
-            mt_uskg,
-            ex,
-            remove_struct_duplicate_nodes=True)
-
         ex_out_dict = {'ex_id': ex_id}
 
-        input_too_long = False
+        is_valid = True
 
-        enc_tokenized = analysis_ex['enc_tokenized']
-        input_len = len(enc_tokenized['input_ids'])
-        if input_len > 500:
-            ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
-            input_too_long = True
+        try:
+            analysis_ex = ctu.create_analysis_sample_dicts_all_nodes(
+                mt_uskg,
+                ex,
+                remove_struct_duplicate_nodes=True)
+            
+            enc_tokenized = analysis_ex['enc_tokenized']
+            input_len = len(enc_tokenized['input_ids'])
+            if input_len > 500:
+                raise ctu.SDRASampleError(f'Input too long: {input_len} > 500')
+            
+            result = trace_exp4_1(mt_uskg, analysis_ex)
 
-        if input_too_long:
+        except ctu.SDRASampleError as e:
+            ex_out_dict['err_msg'] = str(e)
+
             ## Make some placeholders 
             # result_dict = ctu.make_basic_result_dict(ex)
             # result_dict['attentions'] = {
             #     'col': dict(),
             #     'tab': dict(),
             # }
-            result_dict = None
-            ex_out_dict['trace_results'] = result_dict
-            continue
-        
-        result = trace_exp4_1(mt_uskg, analysis_ex)
+            ex_out_dict['trace_results'] = None
 
-        ex_out_dict['trace_results'] = result
+            is_valid = False
+        
+        if is_valid:
+            ex_out_dict['trace_results'] = result
 
         f.write(json.dumps(ex_out_dict, indent=None) + '\n')
         f.flush()
