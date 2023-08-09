@@ -2773,6 +2773,99 @@ def collect_embedding_tdist(mt, degree=3):
     return normal_to_student
 
 
+def add_basic_analysis_info(
+        mt,
+        ex):
+    """
+    BBBB
+    Add basic information for ex (dict) that is needed by all kinds of analysis
+    """
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+
+    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
+    enc_tokenized = mt.tokenizer(enc_sentence)
+    ex['enc_sentence'] = enc_sentence
+    ex['enc_tokenized'] = enc_tokenized
+
+    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
+    ex['text_range'] = text_range
+    ex['struct_range'] = struct_range
+    
+    parsed_struct_in = parse_struct_in(struct_in)
+    ex['parsed_struct_in'] = parsed_struct_in
+
+    alias2table = parse_sql_alias2table(ex['seq_out'])
+    ex['alias2table'] = alias2table
+
+    col2table = defaultdict(list)
+    ## Counters for struct_in
+    col_name_counter = Counter()
+    tab_name_counter = Counter()
+    # node_name_counter = Counter()
+    db_id_t, tables = parsed_struct_in
+    for table_name_t, cols in tables:
+        _, table_name, _ = table_name_t
+        tab_name_counter[table_name] += 1
+        for col_name_t, vals in cols:
+            _, col_name, _ = col_name_t
+            col2table[col_name].append(table_name)
+            col_name_counter[col_name] += 1
+    
+    ex['col2table'] = col2table
+    ex['col_name_counter'] = col_name_counter
+    ex['tab_name_counter'] = tab_name_counter
+
+    # YS NOTE: Merging col and tab to remove "col & table" nodes when remove_dup = True,
+    # since currently make_dec_prompt() can't distinguish node type from SQL 
+    # node_name_counter = col_name_counter + tab_name_counter
+
+    # find_struct_name_ranges(): needs "struct_in", "enc_sentence"; adds "struct_node_ranges_dict"
+    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
+    # ex['struct_node_ranges_dict'] = token_ranges_dict   --> already added
+
+    ## TODO: remove obsolete separate_punct(), replace with separate_punct_by_offset()
+    # sql_tokens = separate_punct(ex['seq_out']).strip().lower().split(' ')
+    sql_token_ranges = separate_punct_by_offset(ex['seq_out'])
+    sql_tokens = [ex['seq_out'][s:e] for s, e in sql_token_ranges]
+    tok_ranges2type = categorize_tokens_offset(ex['seq_out'], sql_token_ranges)
+
+    type2tok_ranges = defaultdict(list)
+    for _rg, _type in tok_ranges2type.items():
+        type2tok_ranges[_type].append(_rg)
+
+    ex['sql_tokens'] = sql_tokens
+    ex['sql_token_ranges'] = sql_token_ranges
+    ex['tok_ranges2type'] = tok_ranges2type
+    ex['type2tok_ranges'] = type2tok_ranges
+
+    sql_col_nodes = set()
+    sql_tab_nodes = set()
+    sql_alias_nodes = set()
+    for _rg, _type in tok_ranges2type.items():
+        s, e = _rg
+        _tok = ex['seq_out'][s:e]
+        if _type == 'column':
+            sql_col_nodes.add(_tok)
+        elif _type == 'table':
+            sql_tab_nodes.add(_tok)
+        elif _type == 'table_alias':
+            sql_alias_nodes.add(_tok)
+
+    ## Sanity check: SQL node should occur in DB struct_in
+    for t in sql_col_nodes:
+        if col_name_counter[t] == 0:
+            err_msg = f'Column {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
+            raise SDRASampleError(err_msg)
+    for t in sql_tab_nodes:
+        if tab_name_counter[t] == 0:
+            err_msg = f'Table {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
+            raise SDRASampleError(err_msg)
+
+
+
+
 def create_analysis_sample_dicts(
         mt, 
         ex, 
@@ -2784,6 +2877,8 @@ def create_analysis_sample_dicts(
     Return:
         analysis_ex_dicts: all basic info needed for any analysis
     """
+
+    # TODO: use add_basic_analysis_info()
 
     text_in = ex['text_in']
     struct_in = ex['struct_in']
@@ -2833,9 +2928,9 @@ def create_analysis_sample_dicts(
     for _rg, _type in tok_ranges2type.items():
         type2tok_ranges[_type].append(_rg)
 
-    # ex['sql_tokens'] = sql_tokens
-    # ex['sql_token_ranges'] = sql_token_ranges
-    # ex['tok_ranges2type'] = tok_ranges2type
+    ex['sql_tokens'] = sql_tokens
+    ex['sql_token_ranges'] = sql_token_ranges
+    ex['tok_ranges2type'] = tok_ranges2type
 
     sql_col_nodes = set()
     sql_tab_nodes = set()
@@ -3017,6 +3112,8 @@ def create_syntax_analysis_sample_dicts(
     Return:
         analysis_ex_dicts: all basic info needed for any analysis
     """
+
+    # TODO: use add_basic_analysis_info()
 
     text_in = ex['text_in']
     struct_in = ex['struct_in']
@@ -3247,6 +3344,8 @@ def create_analysis_sample_dicts_all_nodes(
         a_ex (Dict): all basic info needed for any analysis
     """
 
+    # TODO: use add_basic_analysis_info()
+
     a_ex_col_list = create_analysis_sample_dicts(
                     mt, 
                     ex,
@@ -3282,6 +3381,7 @@ def create_analysis_sample_dicts_all_nodes(
     text_range = a_ex['text_range']
     struct_range = a_ex['struct_range']
 
+    # BUG: can have duplicates here!
     occ_cols = [d['expect'] for d in a_ex_col_list]
     occ_tabs = [d['expect'] for d in a_ex_tab_list]
     
