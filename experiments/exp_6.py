@@ -594,6 +594,206 @@ def trace_exp6_2_decoder_cross_attention_corruption_syntax(
 
 
 
+@f_reg.register('trace_exp', '6.3')
+def trace_exp6_3(
+    mt,
+    a_ex,                           # output from ctu.create_analysis_sample_dicts()
+    corrupt_type='zero',            # 'zero', 'replace', 'add'
+    attn_corrupt_type='weights',    # 'weights', 'logits'
+    device='cuda',
+):
+    """
+    AAA
+    Exp6.3 (both-part-attention-removal-syntax)
+    Check the effect of disabling attention in both encoder and decoder to certain input sections (only text for now)
+    """
+
+    enc_sentence = a_ex['enc_sentence']
+    dec_prompt = a_ex['dec_prompt']
+    expect = a_ex['expect']
+
+    # text_range = a_ex['text_range']
+    # struct_range = a_ex['struct_range']
+
+    # self_ranges = a_ex['self_ranges']
+    # struct_context_ranges = a_ex['context_ranges']
+    # self_tok_indices = [i for s, e in self_ranges for i in range(s, e)]
+    # struct_context_tok_indices = [i for s, e in struct_context_ranges for i in range(s, e)]
+    # text_tok_indices = list(range(*text_range))
+    # struct_tok_indices = list(range(*struct_range))
+    prefix_len = mt.model.preseqlen
+
+    # self_tok_indices_tgt_side = [i + prefix_len for i in self_tok_indices]
+    # struct_context_tok_indices_tgt_side = [i + prefix_len for i in struct_context_tok_indices]
+
+    result = ctu.make_basic_result_dict(a_ex)
+    # result['self_ranges'] = self_ranges
+    # result['struct_context_ranges'] = struct_context_ranges
+
+    ## Check basic results
+    n_samples = 2 if corrupt_type == 'zero' else 11     # "zero" doesn't have randomness 
+
+    inp = ctu.make_inputs_t5(
+        mt.tokenizer,
+        [enc_sentence] * n_samples,
+        [dec_prompt] * n_samples,
+        answer=expect,
+        device=device
+    )
+
+    answer = result['answer']
+    answers_t = result['answers_t']
+    base_score = a_ex['base_score']
+    is_correct_pred = result['correct_prediction']
+
+    bs, enc_seq_len = inp['input_ids'].size()
+    bs, dec_seq_len = inp['decoder_input_ids'].size()
+    
+    if not is_correct_pred:
+        # scores don't make sense when clean pred is wrong 
+        result['is_good_sample'] = False
+        return result
+    
+    base_score = result['base_score']
+
+    """ Low score of exp 6.3: corrupting all attention weights """
+
+    # if corrupt_type == 'add':
+    #     noise = 0.1
+    #     replace = False
+    # elif corrupt_type == 'replace':
+    #     noise = 0.1
+    #     replace = True
+    # elif corrupt_type == 'zero':
+    #     noise = 0.0
+    #     replace = True
+    if corrupt_type != 'zero':
+        raise NotImplementedError
+
+    N_enc_layers = mt.num_enc_layers
+    N_dec_layers = mt.num_dec_layers
+    assert N_enc_layers == N_dec_layers, (N_enc_layers, N_dec_layers)
+    N_layers = N_enc_layers
+
+    enc_att_mix_mask_dict = ctu.build_enc_self_attention_mask(
+        a_ex=a_ex,
+        seq_len=enc_seq_len,
+        prefix_len=prefix_len,
+        use_self_node=False
+    )
+
+    dec_att_mix_mask_dict = ctu.build_dec_cross_attention_mask(
+        a_ex=a_ex,
+        enc_seq_len=enc_seq_len,
+        dec_seq_len=dec_seq_len,
+        prefix_len=prefix_len,
+        use_self_node=False
+    )
+
+    # low_score = result['low_score'] = ctu.trace_attention_manip_uskg_multi_token(
+    #     model=mt.model,
+    #     inp=inp,
+    #     answers_t=answers_t,
+    #     mix_mask_per_layer={ctu.layername_uskg(mt.model, part, l, attn_type) : att_mix_mask_dict['all'] for l in range(N_layers)},
+    #     # layers_to_mix=[ctu.layername_uskg(mt.model, part, l, attn_type) for l in range(N_layers)],
+    #     # src_tokens_to_mix=self_tok_indices,
+    #     # tgt_tokens_to_mix=att_tgt_sections_dict['all'],
+    #     # noise=noise,
+    #     # replace=replace,
+    # ).item()
+
+    # corrupted_vocab_probs: (answer_len, vocab_size)
+    corrupted_vocab_probs = ctu.run_attention_manip_uskg_multi_token(
+        model=mt.model,
+        inp=inp,
+        answer_len=len(answers_t),
+        mix_mask_per_layer=dict(
+            [(ctu.layername_uskg(mt.model, 'encoder', l, 'self_attn'), enc_att_mix_mask_dict['all']) for l in range(N_enc_layers)] + \
+            [(ctu.layername_uskg(mt.model, 'decoder', l, 'cross_attn'), dec_att_mix_mask_dict['all']) for l in range(N_dec_layers)]
+        ),
+        attn_corrupt_type=attn_corrupt_type,
+    )
+    corrupted_answers_t = corrupted_vocab_probs.argmax(dim=-1)
+    corrupted_answer = ctu.decode_sentences(mt.tokenizer, corrupted_answers_t)
+    result['corrupted_answers_t'] = corrupted_answers_t.cpu().tolist()
+    result['corrupted_answer'] = corrupted_answer
+
+    # This is adapted from trace_with_repatch_uskg() (last part)
+    # Compute the prob of correct answer (not corrupted answer)!
+    corrupted_all_ans_probs = []
+    for i, _t in enumerate(answers_t):
+        # let len(answers_t) = n, then the positions of interest are [-n, -n+1, ..., -1]
+        # vocab_probs: [answer_len, vocab_size]
+        prob = corrupted_vocab_probs[i, _t].item()
+        corrupted_all_ans_probs.append(prob)
+
+    low_score = result['low_score'] = min(corrupted_all_ans_probs)
+
+    ## If base and low score has no diff, "too easy", skip
+    if base_score - low_score < 0.5:
+        result['is_good_sample'] = False
+        return result
+
+    result['is_good_sample'] = True
+    
+    """ Starting Exp6.3 """
+
+    # sect_k -> (enc_sect_k, dec_sect_k)
+    section_keys_dict = {
+        's->t&all->t': ('s->t', 'all->t'),
+    }
+
+    layers_range_dict = {
+        'q1_layers': range(N_layers // 4),
+        'q2_layers': range(N_layers // 4, N_layers // 2),
+        'q3_layers': range(N_layers // 2, N_layers * 3 // 4),
+        'q4_layers': range(N_layers * 3 // 4, N_layers),
+        'low_layers': range(N_layers // 2),
+        'mid_layers': range(N_layers // 4, N_layers * 3 // 4),
+        'high_layers': range(N_layers // 2, N_layers),
+        'all_layers': range(N_layers),
+    }
+
+    layer_keys_dict = {
+        'E-all&D-all': ('all_layers', 'all_layers'),
+        'E-all&D-low': ('all_layers', 'low_layers'),
+        'E-low&D-all': ('low_layers', 'all_layers'),
+    }
+
+    result['trace_scores'] = dict()
+    for sect_k in section_keys_dict.keys():
+        result['trace_scores'][sect_k] = dict()
+
+    for sect_k, (enc_sect_k, dec_sect_k) in section_keys_dict.items():
+        # TEMP: only run for newly added sections
+        # if 'c' not in mix_k:
+        # if mix_k != 'c->p':
+        #     continue
+        # END TEMP
+
+        enc_mix_mask = enc_att_mix_mask_dict[enc_sect_k]
+        dec_mix_mask = dec_att_mix_mask_dict[dec_sect_k]
+
+        for layer_k, (enc_layer_k, dec_layer_k) in layer_keys_dict.items():
+            enc_layers = layers_range_dict[enc_layer_k]
+            dec_layers = layers_range_dict[dec_layer_k]
+
+            _score = ctu.trace_attention_manip_uskg_multi_token(
+                model=mt.model,
+                inp=inp,
+                answers_t=answers_t,
+                mix_mask_per_layer=dict(
+                    [(ctu.layername_uskg(mt.model, 'encoder', l, 'self_attn'), enc_mix_mask) for l in enc_layers] + \
+                    [(ctu.layername_uskg(mt.model, 'decoder', l, 'cross_attn'), dec_mix_mask) for l in dec_layers]
+                ),
+                attn_corrupt_type=attn_corrupt_type,
+            ).item()
+            result['trace_scores'][sect_k][layer_k] = _score
+
+    return result
+
+
+
 
 def main_sdra_6_0_encoding_corruption_effect_syntax(args):
     """
@@ -924,6 +1124,17 @@ EXP_6_CONFIGS = {
         'attn_corrupt_type': 'logits',  # with re-normalization
         'result_save_dir_name': 'exp6_2_decoder_cross_attention_corruption_syntax',
         'trace_exp_func_id': '6.2',
+    },
+    ## Exp 6.3
+    '6.3': {
+        'attn_corrupt_type': 'weights',  # no re-normalization
+        'result_save_dir_name': 'exp6_3_both_part_attention_corruption_syntax',
+        'trace_exp_func_id': '6.3',
+    },
+    '6.3.1': {
+        'attn_corrupt_type': 'logits',  # with re-normalization
+        'result_save_dir_name': 'exp6_3_both_part_attention_corruption_syntax',
+        'trace_exp_func_id': '6.3',
     },
 }
 
