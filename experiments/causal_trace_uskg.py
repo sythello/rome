@@ -2826,7 +2826,6 @@ def add_basic_analysis_info(
     token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
     # ex['struct_node_ranges_dict'] = token_ranges_dict   --> already added
 
-    ## TODO: remove obsolete separate_punct(), replace with separate_punct_by_offset()
     # sql_tokens = separate_punct(ex['seq_out']).strip().lower().split(' ')
     sql_token_ranges = separate_punct_by_offset(ex['seq_out'])
     sql_tokens = [ex['seq_out'][s:e] for s, e in sql_token_ranges]
@@ -2864,6 +2863,10 @@ def add_basic_analysis_info(
             err_msg = f'Table {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
             raise SDRASampleError(err_msg)
 
+    ex['sql_col_nodes'] = sql_col_nodes
+    ex['sql_tab_nodes'] = sql_tab_nodes
+    ex['sql_alias_nodes'] = sql_alias_nodes
+
 
 
 
@@ -2879,83 +2882,35 @@ def create_analysis_sample_dicts(
         analysis_ex_dicts: all basic info needed for any analysis
     """
 
-    # TODO: use add_basic_analysis_info()
+    add_basic_analysis_info(mt, ex)
 
     text_in = ex['text_in']
     struct_in = ex['struct_in']
 
-    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-    enc_tokenized = mt.tokenizer(enc_sentence)
-    ex['enc_sentence'] = enc_sentence
-    ex['enc_tokenized'] = enc_tokenized
+    enc_sentence = ex['enc_sentence']
+    enc_tokenized = ex['enc_tokenized']
 
-    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
-    ex['text_range'] = text_range
-    ex['struct_range'] = struct_range
+    text_range = ex['text_range']
+    struct_range = ex['struct_range']
     
-    parsed_struct_in = parse_struct_in(struct_in)
-    ex['parsed_struct_in'] = parsed_struct_in
+    parsed_struct_in = ex['parsed_struct_in']
 
-    alias2table = parse_sql_alias2table(ex['seq_out'])
-    ex['alias2table'] = alias2table
+    alias2table = ex['alias2table']
 
-    col2table = defaultdict(list)
-    # node_name_counter = Counter()
-    col_name_counter = Counter()
-    tab_name_counter = Counter()
-    db_id_t, tables = parsed_struct_in
-    for table_name_t, cols in tables:
-        _, table_name, _ = table_name_t
-        tab_name_counter[table_name] += 1
-        for col_name_t, vals in cols:
-            _, col_name, _ = col_name_t
-            col2table[col_name].append(table_name)
-            col_name_counter[col_name] += 1
-    
-    # YS NOTE: Merging col and tab to remove "col & table" nodes when remove_dup = True,
-    # since currently make_dec_prompt() can't distinguish node type from SQL 
+    col2table = ex['col2table']
+    col_name_counter = ex['col_name_counter']
+    tab_name_counter = ex['tab_name_counter']
+
+    token_ranges_dict = ex['struct_node_ranges_dict']
+
+    sql_token_ranges = ex['sql_token_ranges']
+    tok_ranges2type = ex['tok_ranges2type']
+    type2tok_ranges = ex['type2tok_ranges']
+
+    ## NOTE: Start specific code for creating node analysis samples
+    # YS: Merging col and tab to remove "col & table" nodes when remove_dup = True,
+    # Though now we can distinguish cols and tables, just keep the consistency of removing those 
     node_name_counter = col_name_counter + tab_name_counter
-
-    # Needs "struct_in", "enc_sentence"; adds "struct_node_ranges_dict"
-    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
-
-    ## TODO: remove obsolete separate_punct(), replace with separate_punct_by_offset()
-    # sql_tokens = separate_punct(ex['seq_out']).strip().lower().split(' ')
-    sql_token_ranges = separate_punct_by_offset(ex['seq_out'])
-    sql_tokens = [ex['seq_out'][s:e] for s, e in sql_token_ranges]
-    tok_ranges2type = categorize_tokens_offset(ex['seq_out'], sql_token_ranges)
-
-    type2tok_ranges = defaultdict(list)
-    for _rg, _type in tok_ranges2type.items():
-        type2tok_ranges[_type].append(_rg)
-
-    ex['sql_tokens'] = sql_tokens
-    ex['sql_token_ranges'] = sql_token_ranges
-    ex['tok_ranges2type'] = tok_ranges2type
-
-    sql_col_nodes = set()
-    sql_tab_nodes = set()
-    sql_alias_nodes = set()
-    for _rg, _type in tok_ranges2type.items():
-        s, e = _rg
-        _tok = ex['seq_out'][s:e]
-        if _type == 'column':
-            sql_col_nodes.add(_tok)
-        elif _type == 'table':
-            sql_tab_nodes.add(_tok)
-        elif _type == 'table_alias':
-            sql_alias_nodes.add(_tok)
-
-    ## Sanity check: SQL node should occur in DB struct_in
-    for t in sql_col_nodes:
-        if col_name_counter[t] == 0:
-            err_msg = f'Column {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
-            raise SDRASampleError(err_msg)
-    for t in sql_tab_nodes:
-        if tab_name_counter[t] == 0:
-            err_msg = f'Table {t} not found in struct_in: {struct_in}! (SQL: {ex["seq_out"]})'
-            raise SDRASampleError(err_msg)
-
 
     if subject_type == 'column':
         node_name_ranges = token_ranges_dict['col_name_ranges']
@@ -3114,73 +3069,41 @@ def create_syntax_analysis_sample_dicts(
         analysis_ex_dicts: all basic info needed for any analysis
     """
 
-    # TODO: use add_basic_analysis_info()
+    add_basic_analysis_info(mt, ex)
 
     text_in = ex['text_in']
     struct_in = ex['struct_in']
 
-    enc_sentence = f"{text_in}; structed knowledge: {struct_in}"
-    enc_tokenized = mt.tokenizer(enc_sentence)
-    ex['enc_sentence'] = enc_sentence
-    ex['enc_tokenized'] = enc_tokenized
+    enc_sentence = ex['enc_sentence']
+    enc_tokenized = ex['enc_tokenized']
 
-    text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
-    ex['text_range'] = text_range
-    ex['struct_range'] = struct_range
+    text_range = ex['text_range']
+    struct_range = ex['struct_range']
     
-    parsed_struct_in = parse_struct_in(struct_in)
-    col2table = defaultdict(list)
-    node_name_counter = Counter()
-    db_id_t, tables = parsed_struct_in
-    for table_name_t, cols in tables:
-        _, table_name, _ = table_name_t
-        node_name_counter[table_name] += 1
-        for col_name_t, vals in cols:
-            _, col_name, _ = col_name_t
-            col2table[col_name].append(table_name)
-            node_name_counter[col_name] += 1
+    parsed_struct_in = ex['parsed_struct_in']
 
-    alias2table = parse_sql_alias2table(ex['seq_out'])
+    alias2table = ex['alias2table']
 
-    token_ranges_dict = find_struct_name_ranges(mt.tokenizer, ex)
-    
-    # sql_tokens = separate_punct(ex['seq_out']).split(' ')
-    # sql_nodes = set()
-    # for t in sql_tokens:
-    #     if t in node_name_ranges:
-    #         sql_nodes.add(t)
+    col2table = ex['col2table']
+    col_name_counter = ex['col_name_counter']
+    tab_name_counter = ex['tab_name_counter']
 
-    # # Sanity checking
-    # _phrase_cache = []
-    # syntax_phrases = set()  # include operators like '<', '*' that can only be identified with delimiters (for example, '<' and '<=' are different)
-    # syntax_puncts = set()   # those don't need delimiter to identify; now, only '(', ')', ',', '%'
-    # for t in sql_tokens:
-    #     if t in list(alias2table.keys()) + list(node_name_counter.keys()):
-    #         # emit syntax phrase, if any
-    #         _phrase = ' '.join(_phrase_cache)
-    #         if _phrase:
-    #             assert _phrase in SQL_SYNTAX_PHRASES + SQL_SYNTAX_PUNCTS, (_phrase, sql_tokens)
-    #             if _phrase in SQL_SYNTAX_PHRASES:
-    #                 syntax_phrases.add(_phrase)
-    #             else:
-    #                 syntax_puncts.add(_phrase)
-    #         _phrase_cache = []
-    #     else:
-    #         _phrase_cache.append(t)
-    
-    # # (phrase, is_punct)
-    # syntax_targets = [(p, False) for p in syntax_phrases] + [(p, True) for p in syntax_puncts]
-    # syntax_targets.sort()
+    token_ranges_dict = ex['struct_node_ranges_dict']
 
-    struct_node_list = [f'{als}.' for als in alias2table.keys()] + list(alias2table.keys()) + list(node_name_counter.keys())
+    sql_token_ranges = ex['sql_token_ranges']
+    tok_ranges2type = ex['tok_ranges2type']
+    type2tok_ranges = ex['type2tok_ranges']
+
+    ## NOTE: Start specific code for creating syntax analysis samples
+    # struct_node_list = [f'{als}.' for als in alias2table.keys()] + list(alias2table.keys()) + list(node_name_counter.keys())
 
     # Add hardness info
     sql_hardness = evaluate_hardness(ex['seq_out'], ex['db_id'])
 
-    _sql = ex['seq_out'].strip()
-    if _sql.endswith(';'):
-        _sql = _sql[:-1]
-    sql_token_char_spans = separate_punct_by_offset(_sql)
+    # _sql = ex['seq_out'].strip()
+    # if _sql.endswith(';'):
+    #     _sql = _sql[:-1]
+    # sql_token_char_spans = separate_punct_by_offset(_sql)
 
     # for syntax_p, is_punct in syntax_targets:
     #     dec_prompts = make_dec_prompt(ex['seq_out'], syntax_p)
@@ -3188,40 +3111,49 @@ def create_syntax_analysis_sample_dicts(
     ## TODO: use categorize_tokens_offset() to get syntax tokens
     
     analysis_ex_dicts = []
-    literal_quote = None      # Now only check literal within quotes (', ", `)
-    for tok_char_span in sql_token_char_spans:
+    # literal_quote = None      # Now only check literal within quotes (', ", `)
+    # for tok_char_span in sql_token_char_spans:
+    #     s, e = tok_char_span
+    #     expect = ex['seq_out'][s : e] 
+    #     if expect in struct_node_list:
+    #         continue
+
+    #     dec_prompt = ex['seq_out'][:s].strip()
+    #     if len(dec_prompt) == 0:
+    #         # first token is always "select"; also, empty prompt is prone to bugs
+    #         continue
+
+    #     in_quoted_literal = False
+    #     if (expect in ['"', "'", "`"]) and (literal_quote is None):
+    #         # entering quoted literal
+    #         literal_quote = expect
+    #     elif expect == literal_quote:
+    #         # (must be that literal_quote is not None) exiting quoted literal
+    #         literal_quote = None
+    #         in_quoted_literal = True
+        
+    #     # just exiting quote (in which case it's True assigned above) OR staying inside a quoted literal
+    #     in_quoted_literal = in_quoted_literal or (literal_quote is not None)
+    #     # print(expect, '\t', literal_quote, '\t', in_quoted_literal)
+
+    #     if in_quoted_literal and (not include_literal):
+    #         # not include this sample with literal as expect
+    #         continue
+
+    for tok_char_span in type2tok_ranges['syntax']:
         s, e = tok_char_span
         expect = ex['seq_out'][s : e] 
-        if expect in struct_node_list:
-            continue
-
         dec_prompt = ex['seq_out'][:s].strip()
-        if len(dec_prompt) == 0:
+
+        if (len(dec_prompt) == 0) or (expect == ';'):
             # first token is always "select"; also, empty prompt is prone to bugs
-            continue
-
-        in_quoted_literal = False
-        if (expect in ['"', "'", "`"]) and (literal_quote is None):
-            # entering quoted literal
-            literal_quote = expect
-        elif expect == literal_quote:
-            # (must be that literal_quote is not None) exiting quoted literal
-            literal_quote = None
-            in_quoted_literal = True
-        
-        # just exiting quote (in which case it's True assigned above) OR staying inside a quoted literal
-        in_quoted_literal = in_quoted_literal or (literal_quote is not None)
-        # print(expect, '\t', literal_quote, '\t', in_quoted_literal)
-
-        if in_quoted_literal and (not include_literal):
-            # not include this sample with literal as expect
             continue
 
         _ex = copy.deepcopy(ex)
         _ex['dec_prompt'] = dec_prompt
         _ex['expect'] = expect
         _ex['expect_type'] = 'non_node'
-        _ex['in_quoted_literal'] = in_quoted_literal
+        # _ex['in_quoted_literal'] = in_quoted_literal
         _ex['parsed_struct_in'] = parsed_struct_in
         _ex['col2table'] = col2table
         _ex['token_ranges_dict'] = token_ranges_dict
@@ -3345,46 +3277,98 @@ def create_analysis_sample_dicts_all_nodes(
         a_ex (Dict): all basic info needed for any analysis
     """
 
-    # TODO: use add_basic_analysis_info()
-
-    a_ex_col_list = create_analysis_sample_dicts(
-                    mt, 
-                    ex,
-                    subject_type='column',
-                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
-    a_ex_tab_list = create_analysis_sample_dicts(
-                    mt,
-                    ex,
-                    subject_type='table',
-                    remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)     
+    # a_ex_col_list = create_analysis_sample_dicts(
+    #                 mt, 
+    #                 ex,
+    #                 subject_type='column',
+    #                 remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)
+    # a_ex_tab_list = create_analysis_sample_dicts(
+    #                 mt,
+    #                 ex,
+    #                 subject_type='table',
+    #                 remove_struct_duplicate_nodes=remove_struct_duplicate_nodes)     
     
-    # (Table names never duplicated. Sometimes overlap with column name, but that case is distinguishable. Also, make sure at least one a_ex exist, so we don't get empty list and index error)
-    # Not true, experiments so far don't distinguish col/tab in make_dec_prompt()
+    # Consistent with current setting, remove "col+tab" duplicates if set to True
 
-    a_ex_list = a_ex_col_list + a_ex_tab_list
+    # a_ex_list = a_ex_col_list + a_ex_tab_list
 
-    if len(a_ex_list) == 0:
+
+    add_basic_analysis_info(mt, ex)
+
+    text_in = ex['text_in']
+    struct_in = ex['struct_in']
+
+    enc_sentence = ex['enc_sentence']
+    enc_tokenized = ex['enc_tokenized']
+
+    text_range = ex['text_range']
+    struct_range = ex['struct_range']
+    
+    parsed_struct_in = ex['parsed_struct_in']
+
+    alias2table = ex['alias2table']
+
+    col2table = ex['col2table']
+    col_name_counter = ex['col_name_counter']
+    tab_name_counter = ex['tab_name_counter']
+
+    token_ranges_dict = ex['struct_node_ranges_dict']
+
+    sql_token_ranges = ex['sql_token_ranges']
+    tok_ranges2type = ex['tok_ranges2type']
+    type2tok_ranges = ex['type2tok_ranges']
+
+    ## NOTE: Start specific code for creating analysis samples for all nodes (no specific nodes)
+    node_name_counter = col_name_counter + tab_name_counter
+
+    sql_col_nodes = ex['sql_col_nodes']
+    sql_tab_nodes = ex['sql_tab_nodes']
+
+    occ_cols = []
+    occ_tabs = []
+
+    for node_name in sql_col_nodes:
+        _occ = node_name_counter[node_name]
+        if _occ == 0:
+            # Should have already raised SDRASampleError above!
+            raise ValueError(struct_in, node_name, 'column')
+        elif _occ > 1 and remove_struct_duplicate_nodes:
+            continue
+        occ_cols.append(node_name)
+
+    for node_name in sql_tab_nodes:
+        _occ = node_name_counter[node_name]
+        if _occ == 0:
+            # Should have already raised SDRASampleError above!
+            raise ValueError(struct_in, node_name, 'table')
+        elif _occ > 1 and remove_struct_duplicate_nodes:
+            continue
+        occ_tabs.append(node_name)
+
+    if len(occ_cols) + len(occ_tabs) == 0:
+    # if len(a_ex_list) == 0:
         raise SDRASampleError('No available nodes')
 
-    a_ex = copy.deepcopy(a_ex_list[0])
-    del a_ex['expect']
-    del a_ex['expect_input_ranges']
-    del a_ex['self_ranges']
-    del a_ex['context_ranges']
-    del a_ex['expect_type']
-    del a_ex['node_name_ranges']
-    del a_ex['category']['node_role']
-    del a_ex['category']['text_match']
-    del a_ex['category']['node_len']
+    a_ex = copy.deepcopy(ex)
+    # del a_ex['expect']
+    # del a_ex['expect_input_ranges']
+    # del a_ex['self_ranges']
+    # del a_ex['context_ranges']
+    # del a_ex['expect_type']
+    # del a_ex['node_name_ranges']
+    # del a_ex['category']['node_role']
+    # del a_ex['category']['text_match']
+    # del a_ex['category']['node_len']
     a_ex['dec_prompt'] = 'select'       # placeholder
 
-    token_ranges_dict = a_ex['token_ranges_dict']
-    text_range = a_ex['text_range']
-    struct_range = a_ex['struct_range']
+    # already added
+    # token_ranges_dict = a_ex['token_ranges_dict']
+    # text_range = a_ex['text_range']
+    # struct_range = a_ex['struct_range']
 
-    # BUG: can have duplicates here!
-    occ_cols = [d['expect'] for d in a_ex_col_list]
-    occ_tabs = [d['expect'] for d in a_ex_tab_list]
+    # # BUG: can have duplicates here!
+    # occ_cols = [d['expect'] for d in a_ex_col_list]
+    # occ_tabs = [d['expect'] for d in a_ex_tab_list]
     
     col_name_ranges = a_ex['struct_node_ranges_dict']['col_name_ranges']
     table_name_ranges = a_ex['struct_node_ranges_dict']['table_name_ranges']
