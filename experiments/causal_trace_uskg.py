@@ -30,7 +30,8 @@ from util.runningstats import Covariance, tally
 from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NAME, \
     SQL_SYNTAX_PHRASES, SQL_SYNTAX_PUNCTS, SDRASampleError, \
     load_model_uskg, load_raw_dataset, load_spider_dataset, run_model_forward_uskg, \
-    decode_sentences, decode_tokens, find_token_range, find_text_struct_in_range, find_struct_name_ranges, \
+    decode_sentences, decode_tokens, find_token_range, \
+    find_text_struct_in_range, find_text_struct_in_range_str_tokens, find_struct_name_ranges, \
     separate_punct, separate_punct_by_offset, categorize_tokens_offset, \
     make_dec_prompt, parse_struct_in, ensure_list, \
     ModelAndTokenizer_USKG, layername_uskg, load_evaluator, \
@@ -2491,7 +2492,7 @@ def plot_trace_heatmap_t5(result, savepdf=None, title=None, xlabel=None, modelna
             cmap={None: "Purples", "None": "Purples", "mlp": "Greens", "attn": "Reds"}[
                 kind
             ],
-            vmin=low_score,
+            vmin=low_score,     # NOTE: using low_score as min to showcase the "gain"
         )
         ax.invert_yaxis()
         ax.set_yticks([0.5 + i for i in range(len(differences))])

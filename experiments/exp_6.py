@@ -741,6 +741,7 @@ def trace_exp6_3(
     # sect_k -> (enc_sect_k, dec_sect_k)
     section_keys_dict = {
         's->t&all->t': ('s->t', 'all->t'),
+        # 't->t&all->t': ('t->t', 'all->t'),    # seems trivially need both...
     }
 
     layers_range_dict = {

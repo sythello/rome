@@ -652,6 +652,22 @@ def find_token_range(tokenizer, token_array, substring):
 # YS: other ways to corrupt
 def find_text_struct_in_range(tokenizer, token_array):
     toks = decode_tokens(tokenizer, token_array)
+    return find_text_struct_in_range_str_tokens(toks)
+    # whole_string = "".join(toks)
+    # char_loc = whole_string.index(USKG_SPLITTER_CHARS)
+    # loc = 0
+    # text_tok_end, struct_tok_start = None, None
+    # for i, t in enumerate(toks):
+    #     loc += len(t)
+    #     if text_tok_end is None and loc > char_loc:
+    #         text_tok_end = i
+    #     if struct_tok_start is None and loc >= char_loc + len(USKG_SPLITTER_CHARS):
+    #         struct_tok_start = i + 1
+    #         break
+    # return (0, text_tok_end), (struct_tok_start, len(toks) - 1)     # the last token is </s>, don't corrupt it
+
+
+def find_text_struct_in_range_str_tokens(toks):
     whole_string = "".join(toks)
     char_loc = whole_string.index(USKG_SPLITTER_CHARS)
     loc = 0
@@ -664,6 +680,7 @@ def find_text_struct_in_range(tokenizer, token_array):
             struct_tok_start = i + 1
             break
     return (0, text_tok_end), (struct_tok_start, len(toks) - 1)     # the last token is </s>, don't corrupt it
+
 
 
 def parse_struct_in(struct_in):
