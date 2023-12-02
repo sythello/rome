@@ -42,7 +42,7 @@ from uskg.seq2seq_construction import spider as s2s_spider
 from uskg.third_party.spider.preprocess.get_tables import dump_db_json_schema
 from uskg.third_party.spider import evaluation as sp_eval
 
-
+# This typo is imported from original version of USKG demo code...
 USKG_SPLITTER = '; structed knowledge: '
 USKG_SPLITTER_CHARS = ';structedknowledge:'
 
@@ -130,6 +130,15 @@ def load_model_uskg(model_name, untie_embeddings=False):
     elif model_name == 't5-base-prefix':
         uskg_config = '/home/yshao/Projects/UnifiedSKG/configure/Salesforce/A-T5_base_prefix_spider_with_cell_value.cfg'
         model_path = 'hkunlp/from_all_T5_base_prefix_spider_with_cell_value2'
+    elif model_name == 'gpt2-prefix':
+        # uskg_config = '/home/yshao/Projects/UnifiedSKG/configure/Salesforce/A-GPT2_small_prefix_spider_with_cell_value.cfg'
+        uskg_config = '/home/yshao/Projects/UnifiedSKG/configure/Salesforce/A-GPT2_small_prefix_spider_with_cell_value-pfx=20.cfg'
+        # model_path = '/home/yshao/Projects/UnifiedSKG/output/archive/A-GPT2_small_prefix_spider_with_cell_value-20231019/checkpoint-29500'
+        # model_path = '/home/yshao/Projects/UnifiedSKG/output/A-GPT2_small_prefix_spider_with_cell_value/run-20231027/checkpoint-48500'
+        model_path = '/home/yshao/Projects/UnifiedSKG/output/A-GPT2_small_prefix_spider_with_cell_value-pfx=20/run-20231102/checkpoint-72000'
+    elif model_name == 'gpt2-medium-prefix':
+        uskg_config = '/home/yshao/Projects/UnifiedSKG/configure/Salesforce/A-GPT2_medium_prefix_spider_with_cell_value-pfx=20.cfg'
+        model_path = '/home/yshao/Projects/UnifiedSKG/output/A-GPT2_medium_prefix_spider_with_cell_value-pfx=20/run-20231113/checkpoint-23500'
     else:
         raise NotImplementedError(model_name)
 
@@ -172,6 +181,8 @@ def load_model_uskg(model_name, untie_embeddings=False):
         model.load(model_path)
 
     elif model_path.startswith('t5'):
+        # YS NOTE: why did this branch exist...?
+        # Likely it's for probing test, loading t5 that wasn't tuned
         model = finetune.Model(model_args)
         assert model_path.startswith(model_args.bert.location), (
             'Mismatch', model_path, model_args.bert.location)  # check USKG & T5 version consistency
@@ -181,6 +192,25 @@ def load_model_uskg(model_name, untie_embeddings=False):
         else:
             # original T5, already loaded
             pass
+    
+    elif model_name.startswith('gpt2'):
+        # gpt2 has also been unified in unified.prefixtuning, not yet for finetuning
+        training_args.is_causal_lm = True   # for post-processing
+        if 'prefix' in model_path:
+            assert 'prefix' in uskg_config, ('Mismatch',
+                                             model_path, uskg_config)
+            print(model_args.bert.location)
+            model = prefixtuning.Model(model_args)
+        elif 'finetune' in model_path:
+            # assert 'finetune' in uskg_config, ('Mismatch',
+            #                                    model_path, uskg_config)
+            # model = finetune.Model(model_args)
+            raise NotImplementedError(model_name)
+        else:
+            raise ValueError(model_path)
+        
+        model.load(model_path)
+        
     else:
         raise ValueError(model_path)
     
@@ -661,6 +691,7 @@ def find_text_struct_in_range(tokenizer, token_array):
 
 
 def find_text_struct_in_range_str_tokens(toks):
+    # YS NOTE: using this char-level implementation to avoid weird tokenizations, with overlapping tokens in text/splitter/struct
     whole_string = "".join(toks)
     char_loc = whole_string.index(USKG_SPLITTER_CHARS)
     loc = 0
@@ -1078,4 +1109,30 @@ def nested_json_processing(obj, func):
 #     else:
 #         plt.show()
 
+def find_self_context_ranges(token_ranges_dict, struct_range, expect_input_ranges):
+    ## Processing for struct context; TODO: pull this part out (it's agnostic to `node`)
+    _all_node_range_lists = list(token_ranges_dict['col_name_ranges'].values()) + list(token_ranges_dict['table_name_ranges'].values()) + list(token_ranges_dict['db_id_ranges'].values())
+    _all_node_ranges = [rg
+                        for rg_list in _all_node_range_lists
+                        for rg in rg_list]
+    _all_left_endpoint = [s for s, e in _all_node_ranges] + [struct_range[1]]   # add start of non-struct
+    _all_right_endpoint = [e for s, e in _all_node_ranges] + [struct_range[0]]  # add end of non-struct
+    ## END TODO
 
+    context_range_endpoints = [struct_range[0]]
+    self_range_endpoints = []       # This is different from `expect_input_ranges`: this includes boundary toks
+    for tok_s, tok_e in expect_input_ranges:
+        _l = max([e for e in _all_right_endpoint if e <= tok_s])
+        _r = min([s for s in _all_left_endpoint if s >= tok_e])
+        context_range_endpoints.extend([_l, _r])
+        self_range_endpoints.extend([_l, _r])
+    context_range_endpoints.append(struct_range[1])
+
+    self_ranges = [(self_range_endpoints[i], self_range_endpoints[i+1])
+                    for i in range(0, len(self_range_endpoints), 2)]
+
+    context_ranges = [(context_range_endpoints[i], context_range_endpoints[i+1])
+                        for i in range(0, len(context_range_endpoints), 2)]
+    context_ranges = [(s, e) for s, e in context_ranges if e > s]       # rule out empty spans
+    
+    return self_ranges, context_ranges
