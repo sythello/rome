@@ -209,6 +209,7 @@ def trace_exp4_1_attention_weights_distribution_gpt2(
 
     enc_sentence = a_ex['enc_sentence']
     dec_prompt = a_ex['dec_prompt']
+    pre_sql_sequence = a_ex['pre_sql_sequence']
     # token_ranges_dict = a_ex['token_ranges_dict']     # Key doesn't exist, not sure why t5 version uses this
     token_ranges_dict = a_ex['struct_node_ranges_dict']
     text_range = a_ex['text_range']
@@ -224,7 +225,9 @@ def trace_exp4_1_attention_weights_distribution_gpt2(
 
     inp = ctu2.make_inputs_gpt2(
         mt.tokenizer,
-        [enc_sentence],     # Here we study the counterpart of "Enc.SA", so no need for dec_prompt
+        # Here we study the counterpart of "Enc.SA", so no need for dec_prompt
+        # However `enc_sentence` is not truncated, should probably use `pre_sql_sequence`
+        [pre_sql_sequence],
         answer=None, 
         device=device
     )
@@ -400,7 +403,7 @@ def main_sdra_4_inspect_attention_gpt2(args):
 
         ex_out_dict = {'ex_id': ex_id}
         
-        input_too_long = False
+        # input_too_long = False
         # if len(analysis_samples) > 0:
         #     # enc_sentence = analysis_samples[0]['enc_sentence']
         #     # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
@@ -412,10 +415,18 @@ def main_sdra_4_inspect_attention_gpt2(args):
         #         ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
         #         input_too_long = True
 
+        enc_sentence_toks = mt_uskg_gpt2.tokenizer.tokenize(ex['enc_sentence'])
+        input_len = len(enc_sentence_toks)
+        ## 362: max input len (excluding SQL) in our GPT2-medium config
+        if input_len > 362:
+            ex_out_dict['err_msg'] = f'Input too long: {input_len} > 362'
+            print(f'* Warning: ex_id={ex_id}, Input too long: {input_len} > 362')
+            continue
+
         ex_results = []
         for a_ex in analysis_samples:
-            if input_too_long:
-                continue
+            # if input_too_long:
+            #     continue
 
             # a_ex = add_clean_prediction(mt_uskg, a_ex)
             
@@ -487,8 +498,12 @@ def main_sdra_4_1_attention_weights_distribution(args):
             
             # enc_tokenized = a_ex['enc_tokenized']
             # input_len = len(enc_tokenized['input_ids'])
-            # if input_len > 500:
-            #     raise ctu.SDRASampleError(f'Input too long: {input_len} > 500')
+            enc_sentence_toks = mt_uskg_gpt2.tokenizer.tokenize(ex['enc_sentence'])
+            input_len = len(enc_sentence_toks)
+            ## 362: max input len (excluding SQL) in our GPT2-medium config
+            if input_len > 362:
+                print(f'* Warning: ex_id={ex_id}, Input too long: {input_len} > 362')
+                raise ctu.SDRASampleError(f'Input too long: {input_len} > 362')
             
             result = trace_exp4_1_attention_weights_distribution_gpt2(mt_uskg_gpt2, a_ex)
 

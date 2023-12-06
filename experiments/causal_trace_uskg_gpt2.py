@@ -40,7 +40,8 @@ from util.uskg import USKG_SPLITTER, USKG_SPLITTER_CHARS, RAT_SQL_RELATION_ID2NA
     find_self_context_ranges
 
 from util.uskg_gpt2 import ModelAndTokenizer_USKG_GPT2, run_model_forward_uskg_gpt2, layername_uskg_gpt2, \
-    find_text_struct_in_range_gpt2, find_struct_name_ranges_gpt2
+    find_text_struct_in_range_gpt2, find_struct_name_ranges_gpt2, \
+    USKG_GPT2_OUT_SPLITTER
 
 from transformers import (
     HfArgumentParser,
@@ -1563,7 +1564,14 @@ def add_basic_analysis_info_gpt2(
     # enc_tokenized = mt.tokenizer(enc_sentence)
     ex['enc_sentence'] = enc_sentence
     ex['tokenized_item'] = tokenized_item
-    ex['pre_sql_sequence'] = mt.tokenizer.decode(tokenized_item['input_ids'][:sql_range[0]])    # All tokens before SQL, should end with "; SQL:"
+
+    # All tokens before SQL, should end with "; SQL:"
+    # Does not work, because this (tokenized again) differs from original
+    # ex['pre_sql_sequence'] = mt.tokenizer.decode(tokenized_item['input_ids'][:sql_range[0]])
+
+    # Assuming enc_sentence is not truncated. For analysis, can skip those need truncation
+    _sql_connector = USKG_GPT2_OUT_SPLITTER
+    ex['pre_sql_sequence'] = enc_sentence + ' ' + _sql_connector        
 
     # text_range, struct_range = find_text_struct_in_range(mt.tokenizer, enc_tokenized['input_ids'])
     ex['text_range'] = text_range

@@ -384,44 +384,44 @@ def trace_exp2_section_corrupt_restore_gpt2(
     return result
 
 
-def main_sdra_exp2_section_corrupt_restore_gpt2(args):
-    """
-    AAA
-    Exp 2 for GPT2
-    """
-    spider_dataset_path = args.spider_dataset_path
-    spider_db_dir = args.spider_db_dir
-    data_cache_dir = args.data_cache_dir
+# def main_sdra_exp2_section_corrupt_restore_gpt2(args):
+#     """
+#     AAA
+#     Exp 2 for GPT2
+#     """
+#     spider_dataset_path = args.spider_dataset_path
+#     spider_db_dir = args.spider_db_dir
+#     data_cache_dir = args.data_cache_dir
 
-    exp_name = f'exp=2_{args.ds}_{args.subject_type}'
-    result_save_dir = os.path.join(args.result_dir, 'exp2.2_dirty_text_struct_restore')
-    os.makedirs(result_save_dir, exist_ok=True)
-    result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
+#     exp_name = f'exp=2_{args.ds}_{args.subject_type}'
+#     result_save_dir = os.path.join(args.result_dir, 'exp2.2_dirty_text_struct_restore')
+#     os.makedirs(result_save_dir, exist_ok=True)
+#     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
 
-    mt_uskg = ModelAndTokenizer_USKG_GPT2('gpt2-medium-prefix')
+#     mt_uskg = ModelAndTokenizer_USKG_GPT2('gpt2-medium-prefix')
 
-    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
-    n_ex = len(processed_spider_dataset)
+#     processed_spider_dataset = load_spider_dataset(args, mt_uskg)
+#     n_ex = len(processed_spider_dataset)
 
-    start_id = 0
-    end_id = n_ex
-    stride = 1
-    with open(result_save_path, 'w') as f:
-        for i in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
-            ex = processed_spider_dataset[i]
-            results = trace_exp2_section_corrupt_restore_gpt2(
-                mt=mt_uskg,
-                ex=ex,
-                subject_type=args.subject_type,
-                replace=True,
-                # part=args.part,
-                # part='encoder'
-            )
-            dump_dict = dict(
-                ex_id=i,
-                trace_results=results,
-            )
-            f.write(json.dumps(dump_dict, indent=None) + '\n')
+#     start_id = 0
+#     end_id = n_ex
+#     stride = 1
+#     with open(result_save_path, 'w') as f:
+#         for i in tqdm(range(start_id, end_id, stride), desc=f"MAIN: {exp_name}", ascii=True):
+#             ex = processed_spider_dataset[i]
+#             results = trace_exp2_section_corrupt_restore_gpt2(
+#                 mt=mt_uskg,
+#                 ex=ex,
+#                 subject_type=args.subject_type,
+#                 replace=True,
+#                 # part=args.part,
+#                 # part='encoder'
+#             )
+#             dump_dict = dict(
+#                 ex_id=i,
+#                 trace_results=results,
+#             )
+#             f.write(json.dumps(dump_dict, indent=None) + '\n')
 
 
 def main_sdra_exp2_section_corrupt_restore_gpt2(args):
@@ -446,9 +446,9 @@ def main_sdra_exp2_section_corrupt_restore_gpt2(args):
     os.makedirs(result_save_dir, exist_ok=True)
     result_save_path = os.path.join(result_save_dir, f'{exp_name}.jsonl')
 
-    mt_uskg = ModelAndTokenizer_USKG_GPT2('gpt2-medium-prefix')
+    mt_uskg_gpt2 = ModelAndTokenizer_USKG_GPT2('gpt2-medium-prefix')
 
-    processed_spider_dataset = load_spider_dataset(args, mt_uskg)
+    processed_spider_dataset = load_spider_dataset(args, mt_uskg_gpt2)
     n_ex = len(processed_spider_dataset)
 
     total_samples = 0
@@ -465,37 +465,32 @@ def main_sdra_exp2_section_corrupt_restore_gpt2(args):
 
         if args.is_on_syntax:
             raise NotImplementedError
-            # analysis_samples = create_syntax_analysis_sample_dicts(mt_uskg, ex)
+            # analysis_samples = create_syntax_analysis_sample_dicts(mt_uskg_gpt2, ex)
         else:
             analysis_samples = ctu2.create_analysis_sample_dicts_gpt2(
-                mt_uskg, ex, args.subject_type,
+                mt_uskg_gpt2, ex, args.subject_type,
                 remove_struct_duplicate_nodes=True)
 
         ex_out_dict = {'ex_id': ex_id}
         
-        # For gpt2 we already have truncation
-        # input_too_long = False
-        # if len(analysis_samples) > 0:
-        #     # enc_sentence = analysis_samples[0]['enc_sentence']
-        #     # enc_tokenized = mt_uskg.tokenizer(enc_sentence)
-        #     enc_tokenized = analysis_samples[0]['enc_tokenized']
-        #     input_len = len(enc_tokenized['input_ids'])
-            
-        #     if input_len > 500:
-        #         # ex_out_dict['trace_results'] = []
-        #         ex_out_dict['err_msg'] = f'Input too long: {input_len} > 500'
-        #         input_too_long = True
+        enc_sentence_toks = mt_uskg_gpt2.tokenizer.tokenize(ex['enc_sentence'])
+        input_len = len(enc_sentence_toks)
+        ## 362: max input len (excluding SQL) in our GPT2-medium config
+        if input_len > 362:
+            ex_out_dict['err_msg'] = f'Input too long: {input_len} > 362'
+            print(f'* Warning: ex_id={ex_id}, Input too long: {input_len} > 362')
+            continue
 
         ex_results = []
         for a_ex in analysis_samples:
             # if input_too_long:
             #     continue
 
-            a_ex = ctu2.add_clean_prediction_gpt2(mt_uskg, a_ex)
+            a_ex = ctu2.add_clean_prediction_gpt2(mt_uskg_gpt2, a_ex)
             
             # exp_func = trace_exp2_3
             result = trace_exp2_section_corrupt_restore_gpt2(
-                mt_uskg,
+                mt_uskg_gpt2,
                 a_ex,
                 # replace=args.replace,
                 # noise=args.noise,
