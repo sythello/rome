@@ -567,11 +567,11 @@ def main():
 
     args.result_save_dir = os.path.join(args.result_dir, "gpt2_tracing", "exp2_section_corrupt_restore_gpt2")
 
-    # args.subject_type = 'column'
-    # main_sdra_exp2_section_corrupt_restore_gpt2(args)
+    args.subject_type = 'column'
+    main_sdra_exp2_section_corrupt_restore_gpt2(args)
 
-    # args.subject_type = 'table'
-    # main_sdra_exp2_section_corrupt_restore_gpt2(args)
+    args.subject_type = 'table'
+    main_sdra_exp2_section_corrupt_restore_gpt2(args)
 
     args.subject_type = 'table_alias'
     main_sdra_exp2_section_corrupt_restore_gpt2(args)

@@ -1959,7 +1959,7 @@ def add_clean_prediction_gpt2(
 # def make_basic_result_dict_gpt2(a_ex):
 #     pass
 
-def create_analysis_sample_dicts_all_nodes(
+def create_analysis_sample_dicts_all_nodes_gpt2(
         mt,
         ex,
         remove_struct_duplicate_nodes=True):
@@ -1987,13 +1987,13 @@ def create_analysis_sample_dicts_all_nodes(
     # a_ex_list = a_ex_col_list + a_ex_tab_list
 
 
-    add_basic_analysis_info(mt, ex)
+    add_basic_analysis_info_gpt2(mt, ex)
 
     text_in = ex['text_in']
     struct_in = ex['struct_in']
 
     enc_sentence = ex['enc_sentence']
-    enc_tokenized = ex['enc_tokenized']
+    # enc_tokenized = ex['enc_tokenized']
 
     text_range = ex['text_range']
     struct_range = ex['struct_range']
